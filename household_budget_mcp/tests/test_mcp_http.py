@@ -135,6 +135,28 @@ class BudgetMCPHTTPTests(unittest.TestCase):
         with self.assertRaisesRegex(BudgetValidationError, "unknown parent"):
             load_runtime_config(options)
 
+    def test_category_names_cannot_contain_path_separator(self) -> None:
+        options = Path(self.temporary_directory.name) / "options.json"
+        options.write_text(
+            json.dumps(
+                {
+                    "api_token": TOKEN,
+                    "allowed_hosts": ["testserver"],
+                    "members": ["Alpha"],
+                    "categories": [
+                        {
+                            "name": "Bills/Utilities",
+                            "parent": "",
+                            "monthly_budget": "100.00",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BudgetValidationError, "cannot contain"):
+            load_runtime_config(options)
+
     def test_short_token_fails_closed(self) -> None:
         options = Path(self.temporary_directory.name) / "options.json"
         options.write_text(

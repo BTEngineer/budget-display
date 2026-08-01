@@ -30,6 +30,10 @@ The endpoint is `http://<home-assistant-address>:8099/mcp`. Configure the MCP
 client with the same token as an `Authorization: Bearer ...` header. Keep the
 four-tool allowlist in `hermes-config.example.yaml`.
 
+The `confirm_large_expense` flag is an advisory caller acknowledgement. It
+causes the server to reject an initial expense over $500 when absent, but it is
+not proof that a person approved the transaction.
+
 ## Persistence and backup
 
 The authoritative database is `/data/budget.db`. Home Assistant preserves the

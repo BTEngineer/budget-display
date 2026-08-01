@@ -7,8 +7,8 @@ after installation and is not stored in this repository.
 
 ## Current status
 
-- The E1001 template has Home and Budget pages and expects future read-only
-  Home Assistant budget sensors.
+- The E1001 template has a single Budget page and expects future read-only Home
+  Assistant budget sensors.
 - The ledger stores money as integer cents, rejects duplicate request IDs with
   conflicting data, and uses audit-preserving reversals for undo.
 - The Home Assistant app exposes four authenticated Streamable HTTP MCP tools.
@@ -52,8 +52,9 @@ allowed HTTP Host value. It exposes only:
 - `undo_last_expense`
 
 It exposes no arbitrary SQL, filesystem, shell, deletion, or budget-mutation
-tool. Expenses over $500 require a second call with
-`confirm_large_expense=true` after explicit confirmation.
+tool. The first call for an expense over $500 is rejected until the caller sets
+`confirm_large_expense=true`. This is an advisory client-policy safeguard; the
+server does not independently verify that a person approved the expense.
 
 ## Install in Home Assistant
 
@@ -89,5 +90,7 @@ The E1001 template expects these future Home Assistant sensors:
 - `sensor.household_budget_person_1_month`
 - `sensor.household_budget_person_2_month`
 
-The checked-in ESPHome file contains placeholders only. Keep the E1001 on USB
-power and awake during OTA work.
+The checked-in ESPHome file contains placeholders only. It subscribes only to
+the four budget sensors listed above; it does not display weather, occupancy,
+door, person-detection, or lock status. Keep the E1001 on USB power and awake
+during OTA work.

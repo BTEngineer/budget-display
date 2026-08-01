@@ -157,6 +157,22 @@ class BudgetLedger:
                 SELECT DISTINCT month, 'migrated' FROM monthly_budgets
                 """
             )
+            connection.execute(
+                """
+                UPDATE ledger_entries AS reversal
+                SET local_month = (
+                    SELECT original.local_month
+                    FROM ledger_entries AS original
+                    WHERE original.id = reversal.reverses_entry_id
+                )
+                WHERE reversal.reverses_entry_id IS NOT NULL
+                  AND local_month != (
+                      SELECT original.local_month
+                      FROM ledger_entries AS original
+                      WHERE original.id = reversal.reverses_entry_id
+                  )
+                """
+            )
             connection.execute("UPDATE members SET active = 0")
             for member in self.members:
                 connection.execute(
@@ -264,31 +280,62 @@ class BudgetLedger:
         if not request_id:
             raise BudgetValidationError("request_id is required")
         cents = _parse_cents(amount)
-        timestamp, local_month = self._normalize_timestamp(occurred_at or _utc_now())
+        clean_description = description.strip()
+        requested_timestamp = (
+            self._normalize_timestamp(occurred_at)[0]
+            if occurred_at is not None
+            else None
+        )
 
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
-                "SELECT * FROM ledger_entries WHERE request_id = ?", (request_id,)
+                """
+                SELECT entry.*, member.name AS member_name,
+                       category.name AS category_name,
+                       parent.name AS parent_category_name
+                FROM ledger_entries entry
+                JOIN members member ON member.id = entry.member_id
+                JOIN categories category ON category.id = entry.category_id
+                LEFT JOIN categories parent ON parent.id = category.parent_id
+                WHERE entry.request_id = ?
+                """,
+                (request_id,),
             ).fetchone()
-            member_id = self._member_id(connection, member)
-            category_id = self._category_id(connection, category)
-            payload = (member_id, category_id, cents, description.strip(), timestamp)
             if existing:
-                existing_payload = (
-                    existing["member_id"],
-                    existing["category_id"],
-                    existing["amount_cents"],
-                    existing["description"],
-                    existing["occurred_at"],
+                requested_category = self._normalize_category_path(category)
+                existing_category = "/".join(
+                    part
+                    for part in (
+                        existing["parent_category_name"],
+                        existing["category_name"],
+                    )
+                    if part is not None
                 )
-                if existing_payload != payload or existing["reverses_entry_id"] is not None:
+                payload_matches = (
+                    existing["reverses_entry_id"] is None
+                    and existing["member_name"].casefold() == member.strip().casefold()
+                    and existing_category.casefold() == requested_category.casefold()
+                    and existing["amount_cents"] == cents
+                    and existing["description"] == clean_description
+                    and (
+                        requested_timestamp is None
+                        or existing["occurred_at"] == requested_timestamp
+                    )
+                )
+                if not payload_matches:
                     raise DuplicateRequestError(
                         "request_id already belongs to a different ledger operation"
                     )
                 connection.rollback()
                 return self._entry(connection, existing["id"], duplicate=True)
 
+            member_id = self._member_id(connection, member)
+            category_id = self._category_id(connection, category)
+            timestamp, local_month = self._normalize_timestamp(
+                occurred_at if occurred_at is not None else _utc_now()
+            )
+            payload = (member_id, category_id, cents, clean_description, timestamp)
             cursor = connection.execute(
                 """
                 INSERT INTO ledger_entries(
@@ -311,11 +358,20 @@ class BudgetLedger:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
-                "SELECT id, reverses_entry_id FROM ledger_entries WHERE request_id = ?",
+                """
+                SELECT entry.id, entry.reverses_entry_id, members.name AS member_name
+                FROM ledger_entries entry
+                JOIN members ON members.id = entry.member_id
+                WHERE entry.request_id = ?
+                """,
                 (request_id,),
             ).fetchone()
             if existing:
-                if existing["reverses_entry_id"] is None:
+                member_matches = (
+                    member is None
+                    or existing["member_name"].casefold() == member.strip().casefold()
+                )
+                if existing["reverses_entry_id"] is None or not member_matches:
                     raise DuplicateRequestError(
                         "request_id already belongs to a different ledger operation"
                     )
@@ -358,8 +414,8 @@ class BudgetLedger:
                     -original["amount_cents"],
                     f"Undo: {original['description']}".rstrip(),
                     (undo_time := _utc_now()),
-                    self._normalize_timestamp(undo_time)[1],
-                    _utc_now(),
+                    original["local_month"],
+                    undo_time,
                     original["id"],
                 ),
             )
@@ -450,9 +506,10 @@ class BudgetLedger:
                 """
                 SELECT root.name, COALESCE(SUM(entry.amount_cents), 0) AS cents
                 FROM categories root
-                LEFT JOIN categories child ON child.parent_id = root.id
+                LEFT JOIN categories included
+                  ON included.id = root.id OR included.parent_id = root.id
                 LEFT JOIN ledger_entries entry
-                  ON entry.category_id = COALESCE(child.id, root.id)
+                  ON entry.category_id = included.id
                  AND entry.local_month = ?
                 WHERE root.parent_id IS NULL
                   AND (
@@ -533,10 +590,14 @@ class BudgetLedger:
     def _category_id(
         connection: sqlite3.Connection, path: str, *, allow_parent: bool = False
     ) -> int:
-        parts = [part.strip() for part in path.split("/") if part.strip()]
+        parts = BudgetLedger._category_parts(path)
         if len(parts) == 1:
             rows = connection.execute(
-                "SELECT id FROM categories WHERE name = ? AND active = 1", (parts[0],)
+                """
+                SELECT id FROM categories
+                WHERE parent_id IS NULL AND name = ? AND active = 1
+                """,
+                (parts[0],),
             ).fetchall()
         elif len(parts) == 2:
             rows = connection.execute(
@@ -562,6 +623,17 @@ class BudgetLedger:
                 f"{path} requires a subcategory (for example, {path}/Food)"
             )
         return category_id
+
+    @staticmethod
+    def _category_parts(path: str) -> list[str]:
+        parts = [part.strip() for part in path.split("/") if part.strip()]
+        if len(parts) not in (1, 2):
+            raise BudgetValidationError("category must be 'Category' or 'Parent/Child'")
+        return parts
+
+    @staticmethod
+    def _normalize_category_path(path: str) -> str:
+        return "/".join(BudgetLedger._category_parts(path))
 
     @staticmethod
     def _entry(

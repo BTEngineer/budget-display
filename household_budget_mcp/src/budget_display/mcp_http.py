@@ -64,6 +64,10 @@ def _load_categories(
             raise BudgetValidationError("category names must contain 1 to 80 characters")
         if parent is not None and len(parent) > 80:
             raise BudgetValidationError("category parent names cannot exceed 80 characters")
+        if "/" in name or (parent is not None and "/" in parent):
+            raise BudgetValidationError(
+                "category names cannot contain '/' because it separates parent and child names"
+            )
         if parent is not None and raw_budget:
             raise BudgetValidationError(
                 f"subcategory {name!r} cannot define a monthly budget"

@@ -14,9 +14,22 @@ jobs:
       run:
         working-directory: household_budget_mcp
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v8
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.1"
       - name: Install locked dependencies
         run: uv sync --locked
+      - name: Verify hashed production requirements
+        run: |
+          uv export --locked --no-dev --no-emit-project --no-header --format requirements-txt --output-file /tmp/requirements.lock
+          diff -u requirements.lock /tmp/requirements.lock
       - name: Run tests
         run: uv run python -m unittest discover -s tests -v
+      - name: Audit locked dependencies
+        uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
+        with:
+          inputs: household_budget_mcp/requirements.lock
+          require-hashes: true
+          no-deps: true
+          disable-pip: true

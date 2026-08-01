@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from budget_display import BudgetLedger, BudgetValidationError, DuplicateRequestError
 
@@ -51,6 +52,31 @@ class BudgetLedgerTests(unittest.TestCase):
         self.assertFalse(first["duplicate"])
         self.assertTrue(second["duplicate"])
         self.assertEqual(first["id"], second["id"])
+
+    def test_duplicate_without_occurred_at_uses_stored_server_timestamp(self) -> None:
+        with patch(
+            "budget_display.ledger._utc_now",
+            side_effect=(
+                "2026-08-01T12:00:00+00:00",
+                "2026-08-01T12:00:00+00:00",
+                "2026-08-01T12:00:01+00:00",
+            ),
+        ):
+            first = self.ledger.add_expense(
+                request_id="timestamp-less-retry",
+                member="Member 1",
+                category="Everyday",
+                amount="1.00",
+            )
+            duplicate = self.ledger.add_expense(
+                request_id="timestamp-less-retry",
+                member="Member 1",
+                category="Everyday",
+                amount="1.00",
+            )
+        self.assertFalse(first["duplicate"])
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(first["id"], duplicate["id"])
 
     def test_request_id_cannot_be_reused_for_different_payload(self) -> None:
         self.ledger.add_expense(
@@ -122,6 +148,58 @@ class BudgetLedgerTests(unittest.TestCase):
         self.assertTrue(duplicate["duplicate"])
         self.assertEqual(self.ledger.list_spending(month="2026-08")["spent_cents"], 0)
 
+    def test_cross_month_undo_reverses_the_original_month(self) -> None:
+        self.ledger.add_expense(
+            request_id="july-expense",
+            member="Member 1",
+            category="Everyday",
+            amount="10.00",
+            occurred_at="2026-07-31T20:00:00-04:00",
+        )
+        with patch(
+            "budget_display.ledger._utc_now",
+            return_value="2026-08-01T12:00:00+00:00",
+        ):
+            self.ledger.undo_last_expense(
+                request_id="august-undo", member="Member 1"
+            )
+        self.assertEqual(self.ledger.list_spending(month="2026-07")["spent_cents"], 0)
+        self.assertEqual(self.ledger.list_spending(month="2026-08")["spent_cents"], 0)
+
+    def test_initialize_repairs_legacy_cross_month_reversal(self) -> None:
+        self.ledger.add_expense(
+            request_id="legacy-original",
+            member="Member 1",
+            category="Everyday",
+            amount="10.00",
+            occurred_at="2026-07-31T20:00:00-04:00",
+        )
+        self.ledger.undo_last_expense(request_id="legacy-undo", member="Member 1")
+        with self.ledger._connection() as connection:
+            connection.execute(
+                "UPDATE ledger_entries SET local_month = '2026-08' WHERE request_id = ?",
+                ("legacy-undo",),
+            )
+            connection.commit()
+        self.ledger.initialize()
+        self.assertEqual(self.ledger.list_spending(month="2026-07")["spent_cents"], 0)
+        self.assertEqual(self.ledger.list_spending(month="2026-08")["spent_cents"], 0)
+
+    def test_undo_request_id_cannot_be_reused_for_another_member(self) -> None:
+        self.ledger.add_expense(
+            request_id="member-one-expense",
+            member="Member 1",
+            category="Everyday",
+            amount="10.00",
+        )
+        self.ledger.undo_last_expense(
+            request_id="member-one-undo", member="Member 1"
+        )
+        with self.assertRaises(DuplicateRequestError):
+            self.ledger.undo_last_expense(
+                request_id="member-one-undo", member="Member 2"
+            )
+
     def test_initial_monthly_limits_total_1800(self) -> None:
         summary = self.ledger.list_spending(month="2026-08")
         self.assertEqual(summary["budget_cents"], 180000)
@@ -184,6 +262,49 @@ class BudgetLedgerTests(unittest.TestCase):
                 category="New Category",
                 amount="1.00",
             )
+
+    def test_adding_subcategory_preserves_direct_parent_category_totals(self) -> None:
+        database = Path(self.temporary_directory.name) / "category-history.db"
+        original = BudgetLedger(
+            database,
+            categories=(("Meals", None, 30_000),),
+        )
+        original.initialize()
+        original.add_expense(
+            request_id="direct-parent-expense",
+            member="Member 1",
+            category="Meals",
+            amount="10.00",
+            occurred_at="2026-08-01T12:00:00+00:00",
+        )
+
+        reconfigured = BudgetLedger(
+            database,
+            categories=(("Meals", None, 30_000), ("Food", "Meals", None)),
+        )
+        reconfigured.initialize()
+        summary = reconfigured.list_spending(month="2026-08")
+        self.assertEqual(summary["spent_cents"], 1000)
+        self.assertEqual(summary["by_category_cents"]["Meals"], 1000)
+
+    def test_root_category_can_share_a_name_with_a_child(self) -> None:
+        ledger = BudgetLedger(
+            Path(self.temporary_directory.name) / "same-name.db",
+            categories=(
+                ("Food", None, 10_000),
+                ("Meals", None, 20_000),
+                ("Food", "Meals", None),
+            ),
+        )
+        ledger.initialize()
+        entry = ledger.add_expense(
+            request_id="root-food",
+            member="Member 1",
+            category="Food",
+            amount="1.00",
+        )
+        self.assertEqual(entry["category"], "Food")
+        self.assertIsNone(entry["parent_category"])
 
 
 if __name__ == "__main__":

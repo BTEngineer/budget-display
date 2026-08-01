@@ -59,7 +59,7 @@ class BudgetMCPServerTests(unittest.TestCase):
         self.assertEqual(summary.structured_content["spent_cents"], 800)
         self.assertEqual(summary.structured_content["budget_cents"], 180000)
 
-    def test_large_expense_requires_explicit_confirmation(self) -> None:
+    def test_large_expense_requires_caller_acknowledgement(self) -> None:
         arguments = {
             "request_id": "telegram-mcp-2",
             "member": "Member 1",
@@ -69,7 +69,7 @@ class BudgetMCPServerTests(unittest.TestCase):
         }
         rejected = self.call("add_expense", arguments)
         self.assertTrue(rejected.is_error)
-        self.assertIn("ask the user to confirm", rejected.content[0].text)
+        self.assertIn("caller policy must acknowledge", rejected.content[0].text)
         self.assertEqual(self.ledger.list_spending(month="2026-08")["spent_cents"], 0)
 
         accepted = self.call(

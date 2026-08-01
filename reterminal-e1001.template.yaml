@@ -94,11 +94,6 @@ sensor:
           max_value: 100
 
   - platform: homeassistant
-    id: outside_temperature
-    entity_id: weather.forecast_home
-    attribute: temperature
-
-  - platform: homeassistant
     id: budget_spent
     entity_id: sensor.household_budget_spent_month
 
@@ -114,54 +109,10 @@ sensor:
     id: budget_person_2
     entity_id: sensor.household_budget_person_2_month
 
-text_sensor:
-  - platform: homeassistant
-    id: weather_condition
-    entity_id: weather.forecast_home
-
 binary_sensor:
-  - platform: homeassistant
-    id: away_mode
-    entity_id: input_boolean.ai_away_mode
-
-  - platform: homeassistant
-    id: front_door
-    entity_id: binary_sensor.front_door_sensor
-  - platform: homeassistant
-    id: front_lock
-    entity_id: binary_sensor.front_door_lock
-
-  - platform: homeassistant
-    id: garage_door
-    entity_id: binary_sensor.inside_garage_door
-  - platform: homeassistant
-    id: garage_lock
-    entity_id: binary_sensor.inside_garage_door_lock
-
-  - platform: homeassistant
-    id: deck_door
-    entity_id: binary_sensor.deck_door
-  - platform: homeassistant
-    id: deck_lock
-    entity_id: binary_sensor.deck_door_lock
-
-  - platform: homeassistant
-    id: basement_door
-    entity_id: binary_sensor.front_porch_basement_door_sensor
-  - platform: homeassistant
-    id: basement_lock
-    entity_id: binary_sensor.basement_door_lock
-
-  - platform: homeassistant
-    id: front_person
-    entity_id: binary_sensor.reolink_trackmix_poe_person
-  - platform: homeassistant
-    id: garage_person
-    entity_id: binary_sensor.garage_person
-
   - platform: gpio
     id: next_button
-    name: Next Screen Button
+    name: Right Refresh Button
     pin:
       number: GPIO3
       mode: INPUT_PULLUP
@@ -169,7 +120,6 @@ binary_sensor:
       allow_other_uses: true
     on_press:
       then:
-        - display.page.show_next: epaper_display
         - component.update: epaper_display
 
   - platform: gpio
@@ -188,7 +138,7 @@ binary_sensor:
 
   - platform: gpio
     id: previous_button
-    name: Previous Screen Button
+    name: Left Refresh Button
     pin:
       number: GPIO5
       mode: INPUT_PULLUP
@@ -196,7 +146,6 @@ binary_sensor:
       allow_other_uses: true
     on_press:
       then:
-        - display.page.show_previous: epaper_display
         - component.update: epaper_display
 
 time:
@@ -246,63 +195,6 @@ display:
       inverted: true
     update_interval: never
     pages:
-      - id: home_page
-        lambda: |-
-          auto now = id(ha_time).now();
-          it.printf(24, 18, id(heading_font), "HOME");
-          if (now.is_valid()) {
-            it.strftime(776, 22, id(body_font), TextAlign::TOP_RIGHT,
-                        "%a %b %d  %I:%M %p", now);
-          }
-          it.line(24, 70, 776, 70);
-
-          if (!isnan(id(outside_temperature).state)) {
-            it.printf(24, 90, id(value_font), "%.0f F",
-                      id(outside_temperature).state);
-          } else {
-            it.print(24, 90, id(value_font), "-- F");
-          }
-          it.printf(235, 106, id(body_font), "%s",
-                    id(weather_condition).state.c_str());
-          it.printf(776, 106, id(body_font), TextAlign::TOP_RIGHT,
-                    "Away mode: %s", id(away_mode).state ? "ON" : "OFF");
-
-          it.print(24, 180, id(body_font), "Front");
-          it.printf(190, 180, id(body_font), "%s / %s",
-                    id(front_door).state ? "OPEN" : "CLSD",
-                    id(front_lock).state ? "UNLK" : "LCKD");
-          it.print(430, 180, id(body_font), "Garage");
-          it.printf(776, 180, id(body_font), TextAlign::TOP_RIGHT, "%s / %s",
-                    id(garage_door).state ? "OPEN" : "CLSD",
-                    id(garage_lock).state ? "UNLK" : "LCKD");
-
-          it.print(24, 230, id(body_font), "Deck");
-          it.printf(190, 230, id(body_font), "%s / %s",
-                    id(deck_door).state ? "OPEN" : "CLSD",
-                    id(deck_lock).state ? "UNLK" : "LCKD");
-          it.print(430, 230, id(body_font), "Basement");
-          it.printf(776, 230, id(body_font), TextAlign::TOP_RIGHT, "%s / %s",
-                    id(basement_door).state ? "OPEN" : "CLSD",
-                    id(basement_lock).state ? "UNLK" : "LCKD");
-
-          it.line(24, 290, 776, 290);
-          if (id(front_person).state || id(garage_person).state) {
-            it.print(24, 315, id(heading_font), "PERSON ALERT");
-            if (id(front_person).state) {
-              it.print(330, 322, id(body_font), "Front porch");
-            }
-            if (id(garage_person).state) {
-              it.print(570, 322, id(body_font), "Garage");
-            }
-          } else {
-            it.print(24, 315, id(heading_font), "PERIMETER CLEAR");
-          }
-
-          it.printf(24, 430, id(body_font), "Battery %.0f%%",
-                    id(battery_level).state);
-          it.print(776, 430, id(body_font), TextAlign::TOP_RIGHT,
-                   "< Previous     Green Refresh     Next >");
-
       - id: budget_page
         lambda: |-
           auto now = id(ha_time).now();
@@ -318,7 +210,7 @@ display:
             it.print(400, 180, id(heading_font), TextAlign::TOP_CENTER,
                      "BUDGET SERVICE NOT CONNECTED");
             it.print(400, 245, id(body_font), TextAlign::TOP_CENTER,
-                     "The Home screen is ready.");
+                     "Waiting for budget sensors.");
             it.print(400, 285, id(body_font), TextAlign::TOP_CENTER,
                      "Budget totals will appear here after setup.");
           } else {
@@ -341,7 +233,7 @@ display:
           it.printf(24, 430, id(body_font), "Battery %.0f%%",
                     id(battery_level).state);
           it.print(776, 430, id(body_font), TextAlign::TOP_RIGHT,
-                   "< Previous     Green Refresh     Next >");
+                   "Press any button to refresh");
 
 deep_sleep:
   id: display_sleep

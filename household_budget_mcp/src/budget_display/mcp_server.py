@@ -73,9 +73,10 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         Use the source message ID as request_id. Member and category must match
         the Home Assistant app configuration; a parent with children requires
         Parent/Child notation. Amount is a positive decimal string such as
-        "8.00". Expenses over $500 require confirm_large_expense=true after
-        explicit user confirmation. occurred_at must be an ISO 8601 timestamp
-        with timezone when supplied.
+        "8.00". Expenses over $500 require the caller to acknowledge the amount
+        with confirm_large_expense=true. This flag is an advisory client-policy
+        safeguard; the server cannot prove that a person approved it. occurred_at
+        must be an ISO 8601 timestamp with timezone when supplied.
         """
         clean_request_id = _validate_bounded_text(
             request_id, name="request_id", maximum=MAX_REQUEST_ID_LENGTH
@@ -88,7 +89,7 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         cents = _amount_cents_for_confirmation(amount)
         if cents > LARGE_EXPENSE_CENTS and not confirm_large_expense:
             raise BudgetValidationError(
-                "expense exceeds $500; ask the user to confirm the exact amount, member, and category, then retry with confirm_large_expense=true"
+                "expense exceeds $500; caller policy must acknowledge the exact amount, member, and category, then retry with confirm_large_expense=true"
             )
         return ready_ledger().add_expense(
             request_id=clean_request_id,
