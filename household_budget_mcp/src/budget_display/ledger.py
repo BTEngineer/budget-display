@@ -529,11 +529,75 @@ class BudgetLedger:
                 """,
                 (month, month),
             ).fetchall()
+            direct_category_member = connection.execute(
+                """
+                SELECT category.name AS category_name,
+                       parent.name AS parent_name,
+                       members.name AS member_name,
+                       COALESCE(SUM(entry.amount_cents), 0) AS cents
+                FROM categories category
+                LEFT JOIN categories parent ON parent.id = category.parent_id
+                CROSS JOIN members
+                LEFT JOIN ledger_entries entry
+                  ON entry.category_id = category.id
+                 AND entry.member_id = members.id
+                 AND entry.local_month = ?
+                WHERE category.active = 1 AND members.active = 1
+                GROUP BY category.id, members.id
+                ORDER BY category.id, members.id
+                """,
+                (month,),
+            ).fetchall()
+            category_budgets = connection.execute(
+                """
+                SELECT categories.name, monthly_budgets.amount_cents
+                FROM monthly_budgets
+                JOIN categories ON categories.id = monthly_budgets.category_id
+                WHERE monthly_budgets.month = ? AND categories.active = 1
+                """,
+                (month,),
+            ).fetchall()
             budget = connection.execute(
                 "SELECT SUM(amount_cents) AS cents FROM monthly_budgets WHERE month = ?",
                 (month,),
             ).fetchone()["cents"]
             connection.commit()
+        direct: dict[tuple[str | None, str], dict[str, int]] = {}
+        for row in direct_category_member:
+            direct.setdefault(
+                (row["parent_name"], row["category_name"]), {}
+            )[row["member_name"]] = row["cents"]
+        budget_by_root = {row["name"]: row["amount_cents"] for row in category_budgets}
+        category_rows: list[dict[str, object]] = []
+        for name, parent, _ in self.categories:
+            if parent is None:
+                included = [
+                    amounts
+                    for (row_parent, row_name), amounts in direct.items()
+                    if (row_parent is None and row_name == name)
+                    or row_parent == name
+                ]
+                member_totals = {
+                    member: sum(amounts.get(member, 0) for amounts in included)
+                    for member in self.members
+                }
+                row_budget = budget_by_root.get(name)
+            else:
+                member_totals = {
+                    member: direct.get((parent, name), {}).get(member, 0)
+                    for member in self.members
+                }
+                row_budget = None
+            category_rows.append(
+                {
+                    "name": name,
+                    "parent": parent,
+                    "budget_cents": row_budget,
+                    "spent_cents": sum(member_totals.values()),
+                    "by_member_cents": member_totals,
+                }
+            )
+
         return {
             "month": month,
             "spent_cents": total,
@@ -543,6 +607,7 @@ class BudgetLedger:
             "by_category_cents": {
                 row["name"]: row["cents"] for row in by_category
             },
+            "category_rows": category_rows,
         }
 
     @staticmethod

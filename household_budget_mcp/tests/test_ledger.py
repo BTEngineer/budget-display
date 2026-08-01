@@ -117,6 +117,13 @@ class BudgetLedgerTests(unittest.TestCase):
         self.assertEqual(august["by_member_cents"], {"Member 1": 2000, "Member 2": 3000})
         self.assertEqual(august["by_category_cents"]["Everyday"], 2000)
         self.assertEqual(august["by_category_cents"]["Meals"], 3000)
+        rows = {row["name"]: row for row in august["category_rows"]}
+        self.assertEqual(rows["Everyday"]["budget_cents"], 100000)
+        self.assertEqual(rows["Everyday"]["by_member_cents"]["Member 1"], 2000)
+        self.assertEqual(rows["Meals"]["spent_cents"], 3000)
+        self.assertEqual(rows["Meals"]["by_member_cents"]["Member 2"], 3000)
+        self.assertEqual(rows["Food"]["spent_cents"], 3000)
+        self.assertIsNone(rows["Food"]["budget_cents"])
 
     def test_month_uses_household_timezone_not_raw_offset_text(self) -> None:
         self.ledger.add_expense(
@@ -302,9 +309,15 @@ class BudgetLedgerTests(unittest.TestCase):
             member="Member 1",
             category="Food",
             amount="1.00",
+            occurred_at="2026-08-15T12:00:00-04:00",
         )
         self.assertEqual(entry["category"], "Food")
         self.assertIsNone(entry["parent_category"])
+        rows = ledger.list_spending(month="2026-08")["category_rows"]
+        root_food = next(
+            row for row in rows if row["name"] == "Food" and row["parent"] is None
+        )
+        self.assertEqual(root_food["spent_cents"], 100)
 
 
 if __name__ == "__main__":

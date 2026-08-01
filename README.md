@@ -97,8 +97,13 @@ through MQTT discovery:
 - `sensor.household_budget_remaining_month`
 - `sensor.household_budget_person_1_month`
 - `sensor.household_budget_person_2_month`
+- `sensor.household_budget_category_1_month` through
+  `sensor.household_budget_category_6_month`
 
 The checked-in ESPHome file contains placeholders only. It subscribes only to
-the four budget sensors listed above; it does not display weather, occupancy,
-door, person-detection, or lock status. Keep the E1001 on USB power and awake
-during OTA work.
+the budget sensors listed above. The screen shows spent and remaining totals,
+then up to six configured category rows with budget, first-member,
+second-member, and combined spending. Child categories are indented and their
+parent row is the aggregate, so the overall total is not double-counted. It
+does not display weather, occupancy, doors, person detection, locks, or other
+home status. Keep the E1001 on USB power and awake during OTA work.

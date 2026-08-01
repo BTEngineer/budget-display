@@ -57,6 +57,13 @@ class BudgetMQTTPublisherTests(unittest.TestCase):
         self.assertEqual(messages["household_budget/state/remaining_month"], "1000.00")
         self.assertEqual(messages["household_budget/state/person_1_month"], "0.00")
         self.assertEqual(messages["household_budget/state/person_2_month"], "0.00")
+        self.assertEqual(
+            messages["household_budget/state/category_1_month"],
+            "0|Everyday|1000.00|0.00|0.00|0.00",
+        )
+        self.assertEqual(
+            messages["household_budget/state/category_6_month"], "|||||"
+        )
 
         discovery = json.loads(
             messages[
@@ -69,6 +76,52 @@ class BudgetMQTTPublisherTests(unittest.TestCase):
         )
         self.assertEqual(discovery["name"], "Alpha this month")
         self.assertNotIn("secret", json.dumps(discovery))
+
+    def test_category_rows_include_member_and_parent_totals(self) -> None:
+        ledger = BudgetLedger(
+            Path(self.temporary_directory.name) / "category-budget.db",
+            members=("Alpha", "Beta"),
+            categories=(
+                ("Meals", None, 60_000),
+                ("Food", "Meals", None),
+                ("Coffee", "Meals", None),
+            ),
+        )
+        ledger.initialize()
+        ledger.add_expense(
+            request_id="food-a",
+            member="Alpha",
+            category="Meals/Food",
+            amount="10.25",
+        )
+        ledger.add_expense(
+            request_id="coffee-b",
+            member="Beta",
+            category="Meals/Coffee",
+            amount="4.75",
+        )
+        client = FakeMQTTClient()
+        publisher = BudgetMQTTPublisher(
+            ledger=ledger,
+            members=("Alpha", "Beta"),
+            config=MQTTConfig(host="mqtt", port=1883, username="", password=""),
+            client=client,
+        )
+
+        publisher.publish_current()
+        messages = {topic: payload for topic, payload, _, _ in client.messages}
+        self.assertEqual(
+            messages["household_budget/state/category_1_month"],
+            "0|Meals|600.00|10.25|4.75|15.00",
+        )
+        self.assertEqual(
+            messages["household_budget/state/category_2_month"],
+            "1|Food||10.25|0.00|10.25",
+        )
+        self.assertEqual(
+            messages["household_budget/state/category_3_month"],
+            "1|Coffee||0.00|4.75|4.75",
+        )
 
 
 if __name__ == "__main__":

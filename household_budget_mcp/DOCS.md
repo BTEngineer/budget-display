@@ -50,9 +50,15 @@ broker credentials at runtime. The stable display entity IDs are:
 - `sensor.household_budget_remaining_month`
 - `sensor.household_budget_person_1_month`
 - `sensor.household_budget_person_2_month`
+- `sensor.household_budget_category_1_month` through
+  `sensor.household_budget_category_6_month`
 
 Additional configured members use the same numbered pattern. Sensor
-availability follows the budget app's MQTT connection.
+availability follows the budget app's MQTT connection. Each numbered category
+row carries its label, optional top-level budget, first-member total,
+second-member total, and combined total for the E1001. The current display fits
+six category rows. Parent rows aggregate their child categories; child rows are
+also published as detail, and the household total counts each expense once.
 
 ## Security
 

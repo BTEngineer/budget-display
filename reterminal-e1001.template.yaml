@@ -109,6 +109,26 @@ sensor:
     id: budget_person_2
     entity_id: sensor.household_budget_person_2_month
 
+text_sensor:
+  - platform: homeassistant
+    id: budget_category_1
+    entity_id: sensor.household_budget_category_1_month
+  - platform: homeassistant
+    id: budget_category_2
+    entity_id: sensor.household_budget_category_2_month
+  - platform: homeassistant
+    id: budget_category_3
+    entity_id: sensor.household_budget_category_3_month
+  - platform: homeassistant
+    id: budget_category_4
+    entity_id: sensor.household_budget_category_4_month
+  - platform: homeassistant
+    id: budget_category_5
+    entity_id: sensor.household_budget_category_5_month
+  - platform: homeassistant
+    id: budget_category_6
+    entity_id: sensor.household_budget_category_6_month
+
 binary_sensor:
   - platform: gpio
     id: next_button
@@ -155,7 +175,7 @@ time:
 font:
   - file: "gfonts://Inter@400"
     id: body_font
-    size: 26
+    size: 18
     glyphsets: []
     glyphs:
       - " 0123456789"
@@ -164,7 +184,7 @@ font:
       - "$%.,!?()-/:<>"
   - file: "gfonts://Inter@700"
     id: heading_font
-    size: 38
+    size: 30
     glyphsets: []
     glyphs:
       - " 0123456789"
@@ -173,7 +193,7 @@ font:
       - "$%.,!?()-/:<>"
   - file: "gfonts://Inter@700"
     id: value_font
-    size: 54
+    size: 38
     glyphsets: []
     glyphs:
       - " 0123456789"
@@ -216,25 +236,76 @@ display:
             it.print(400, 285, id(body_font), TextAlign::TOP_CENTER,
                      "Budget totals will appear here after setup.");
           } else {
-            it.print(24, 95, id(body_font), "Spent this month");
-            it.printf(24, 135, id(value_font), "$%.2f",
+            it.print(24, 82, id(body_font), "Spent");
+            it.printf(24, 104, id(value_font), "$%.2f",
                       id(budget_spent).state);
-            it.print(430, 95, id(body_font), "Remaining");
-            it.printf(430, 135, id(value_font), "$%.2f",
+            it.print(430, 82, id(body_font), "Remaining");
+            it.printf(430, 104, id(value_font), "$%.2f",
                       id(budget_remaining).state);
 
-            it.line(24, 220, 776, 220);
-            it.print(24, 250, id(body_font), "Member 1");
-            it.printf(24, 290, id(value_font), "$%.2f",
+            it.print(24, 158, id(body_font), "Category");
+            it.print(360, 158, id(body_font), TextAlign::TOP_RIGHT, "Budget");
+            it.print(495, 158, id(body_font), TextAlign::TOP_RIGHT, "Member 1");
+            it.print(650, 158, id(body_font), TextAlign::TOP_RIGHT, "Member 2");
+            it.print(776, 158, id(body_font), TextAlign::TOP_RIGHT, "Total");
+            it.line(24, 182, 776, 182);
+
+            std::array<std::string, 6> raw_rows = {
+              id(budget_category_1).state,
+              id(budget_category_2).state,
+              id(budget_category_3).state,
+              id(budget_category_4).state,
+              id(budget_category_5).state,
+              id(budget_category_6).state,
+            };
+            int visible_row = 0;
+            for (const auto &raw : raw_rows) {
+              std::vector<std::string> fields;
+              size_t start = 0;
+              while (fields.size() < 5) {
+                size_t separator = raw.find('|', start);
+                if (separator == std::string::npos) break;
+                fields.push_back(raw.substr(start, separator - start));
+                start = separator + 1;
+              }
+              fields.push_back(raw.substr(start));
+              if (fields.size() != 6 || fields[1].empty()) continue;
+
+              int y = 191 + visible_row * 31;
+              const bool child = fields[0] == "1";
+              if (child) {
+                it.printf(38, y, id(body_font), "> %s", fields[1].c_str());
+              } else {
+                it.print(24, y, id(body_font), fields[1].c_str());
+              }
+              if (fields[2].empty()) {
+                it.print(360, y, id(body_font), TextAlign::TOP_RIGHT, "--");
+              } else {
+                it.printf(360, y, id(body_font), TextAlign::TOP_RIGHT, "$%.2f",
+                          strtof(fields[2].c_str(), nullptr));
+              }
+              it.printf(495, y, id(body_font), TextAlign::TOP_RIGHT, "$%.2f",
+                        strtof(fields[3].c_str(), nullptr));
+              it.printf(650, y, id(body_font), TextAlign::TOP_RIGHT, "$%.2f",
+                        strtof(fields[4].c_str(), nullptr));
+              it.printf(776, y, id(body_font), TextAlign::TOP_RIGHT, "$%.2f",
+                        strtof(fields[5].c_str(), nullptr));
+              visible_row++;
+            }
+
+            it.line(24, 382, 776, 382);
+            it.print(24, 390, id(body_font), "TOTAL");
+            it.printf(360, 390, id(body_font), TextAlign::TOP_RIGHT, "$%.2f",
+                      id(budget_spent).state + id(budget_remaining).state);
+            it.printf(495, 390, id(body_font), TextAlign::TOP_RIGHT, "$%.2f",
                       id(budget_person_1).state);
-            it.print(430, 250, id(body_font), "Member 2");
-            it.printf(430, 290, id(value_font), "$%.2f",
+            it.printf(650, 390, id(body_font), TextAlign::TOP_RIGHT, "$%.2f",
                       id(budget_person_2).state);
+            it.printf(776, 390, id(body_font), TextAlign::TOP_RIGHT, "$%.2f",
+                      id(budget_spent).state);
           }
 
-          it.printf(24, 430, id(body_font), "Battery %.0f%%",
-                    id(battery_level).state);
-          it.print(776, 430, id(body_font), TextAlign::TOP_RIGHT,
+          it.print(776, 447, id(body_font), TextAlign::TOP_RIGHT,
                    "Press any button to refresh");
 
 deep_sleep:

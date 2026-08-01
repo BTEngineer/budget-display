@@ -19,6 +19,7 @@ LOGGER = logging.getLogger(__name__)
 DEVICE_ID = "household_budget"
 DISCOVERY_PREFIX = "homeassistant"
 STATE_PREFIX = "household_budget"
+MAX_DISPLAY_CATEGORY_ROWS = 6
 
 
 @dataclass(frozen=True)
@@ -137,6 +138,37 @@ class BudgetMQTTPublisher:
                 display_name=f"{member} this month",
                 cents=int(by_member.get(member, 0)),
             )
+        category_rows = summary["category_rows"]
+        if len(category_rows) > MAX_DISPLAY_CATEGORY_ROWS:
+            LOGGER.warning(
+                "Only the first %s budget categories fit on the E1001 display",
+                MAX_DISPLAY_CATEGORY_ROWS,
+            )
+        for index in range(1, MAX_DISPLAY_CATEGORY_ROWS + 1):
+            if index <= len(category_rows):
+                row = category_rows[index - 1]
+                member_totals = row["by_member_cents"]
+                budget_cents = row["budget_cents"]
+                safe_name = str(row["name"]).replace("|", " ")
+                payload = "|".join(
+                    (
+                        "1" if row["parent"] is not None else "0",
+                        safe_name,
+                        "" if budget_cents is None else f"{int(budget_cents) / 100:.2f}",
+                        f"{int(member_totals.get(self.members[0], 0)) / 100:.2f}",
+                        f"{int(member_totals.get(self.members[1], 0)) / 100:.2f}"
+                        if len(self.members) > 1
+                        else "0.00",
+                        f"{int(row['spent_cents']) / 100:.2f}",
+                    )
+                )
+            else:
+                payload = "|||||"
+            self._publish_text_sensor(
+                object_id=f"category_{index}_month",
+                display_name=f"Category row {index} this month",
+                value=payload,
+            )
 
     def _publish_money_sensor(
         self, *, object_id: str, display_name: str, cents: int
@@ -170,3 +202,31 @@ class BudgetMQTTPublisher:
         self.client.publish(
             state_topic, f"{cents / 100:.2f}", qos=1, retain=True
         )
+
+    def _publish_text_sensor(
+        self, *, object_id: str, display_name: str, value: str
+    ) -> None:
+        unique_id = f"household_budget_{object_id}"
+        state_topic = f"{STATE_PREFIX}/state/{object_id}"
+        discovery = {
+            "name": display_name,
+            "unique_id": unique_id,
+            "default_entity_id": f"sensor.{unique_id}",
+            "state_topic": state_topic,
+            "availability_topic": f"{STATE_PREFIX}/status",
+            "payload_available": "online",
+            "payload_not_available": "offline",
+            "device": {
+                "identifiers": [DEVICE_ID],
+                "name": "Household Budget",
+                "manufacturer": "BTEngineer",
+                "model": "Home Assistant Budget MCP",
+            },
+        }
+        self.client.publish(
+            f"{DISCOVERY_PREFIX}/sensor/{unique_id}/config",
+            json.dumps(discovery, separators=(",", ":"), sort_keys=True),
+            qos=1,
+            retain=True,
+        )
+        self.client.publish(state_topic, value, qos=1, retain=True)
