@@ -1,0 +1,49 @@
+name: "Household Budget MCP"
+description: "Private household budget ledger and authenticated MCP endpoint"
+version: "0.3.0"
+slug: "household_budget_mcp"
+url: "https://github.com/BTEngineer/budget-display"
+init: false
+startup: application
+boot: auto
+arch:
+  - amd64
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: "Authenticated Streamable HTTP MCP endpoint"
+options:
+  api_token: ""
+  allowed_hosts:
+    - "homeassistant.local:8099"
+  household_timezone: "America/New_York"
+  members:
+    - "Member 1"
+    - "Member 2"
+  categories:
+    - name: "Everyday"
+      parent: ""
+      monthly_budget: "1000.00"
+    - name: "Occasional"
+      parent: ""
+      monthly_budget: "500.00"
+    - name: "Meals"
+      parent: ""
+      monthly_budget: "300.00"
+    - name: "Food"
+      parent: "Meals"
+      monthly_budget: ""
+    - name: "Drinks"
+      parent: "Meals"
+      monthly_budget: ""
+schema:
+  api_token: password
+  allowed_hosts:
+    - str
+  household_timezone: str
+  members:
+    - str
+  categories:
+    - name: str
+      parent: str
+      monthly_budget: str

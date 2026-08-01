@@ -1,0 +1,20 @@
+# Merge this entry into ~/.hermes/config.yaml on the Hermes host.
+# Store BUDGET_MCP_TOKEN in ~/.hermes/.env, using the same random secret entered
+# in the Home Assistant app configuration.
+mcp_servers:
+  household_budget:
+    url: "http://homeassistant.local:8099/mcp"
+    headers:
+      Authorization: "Bearer ${BUDGET_MCP_TOKEN}"
+    enabled: true
+    timeout: 30
+    connect_timeout: 10
+    supports_parallel_tool_calls: false
+    tools:
+      include:
+        - add_expense
+        - list_spending
+        - list_budget_categories
+        - undo_last_expense
+      resources: false
+      prompts: false

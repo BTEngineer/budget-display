@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "budget-display"
+version = "0.2.0"
+description = "Local household budget ledger for the Hermes and reTerminal E1001 project"
+requires-python = ">=3.11"
+dependencies = ["mcp>=2,<3", "tzdata>=2025.2"]
+
+[project.scripts]
+budget-display = "budget_display.cli:main"
+budget-display-mcp-stdio = "budget_display.mcp_server:main"
+budget-display-mcp-http = "budget_display.mcp_http:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

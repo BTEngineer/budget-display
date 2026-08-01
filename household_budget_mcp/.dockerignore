@@ -1,0 +1,10 @@
+.git
+.venv
+.uv-cache
+__pycache__
+*.egg-info
+*.pyc
+*.db*
+data
+tests
+reterminal-e1001.template.yaml

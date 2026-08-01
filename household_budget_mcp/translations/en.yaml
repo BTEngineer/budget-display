@@ -1,0 +1,25 @@
+configuration:
+  api_token:
+    name: API token
+    description: A random secret of at least 32 characters shared only with the MCP client.
+  allowed_hosts:
+    name: Allowed hosts
+    description: Host and port values clients use to reach this app, without a URL scheme.
+  household_timezone:
+    name: Household timezone
+    description: IANA timezone used to assign expenses to a local calendar month.
+  members:
+    name: Household members
+    description: Names accepted when an expense is recorded.
+  categories:
+    name: Budget categories
+    description: Top-level categories and optional child categories.
+    fields:
+      name:
+        name: Name
+      parent:
+        name: Parent category
+        description: Leave blank for a top-level category.
+      monthly_budget:
+        name: Monthly budget
+        description: Required for top-level categories and blank for child categories.

@@ -1,0 +1,360 @@
+substitutions:
+  device_name: reterminal-e1001
+  friendly_name: reTerminal E1001
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    - priority: 600
+      then:
+        - output.turn_on: battery_measure_enable
+        - delay: 200ms
+        - component.update: battery_voltage
+        - component.update: battery_level
+    - priority: -100
+      then:
+        - delay: 20s
+        - component.update: epaper_display
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: arduino
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+
+api:
+  encryption:
+    key: "REPLACE_WITH_GENERATED_API_KEY"
+
+ota:
+  - platform: esphome
+    password: "REPLACE_WITH_GENERATED_OTA_PASSWORD"
+
+# Must be shorter than deep_sleep.run_duration so an OTA image is marked
+# successful before the device sleeps.
+safe_mode:
+  boot_is_good_after: 30s
+
+wifi:
+  ap:
+    ssid: "reTerminal-E1001 Setup"
+    password: "REPLACE_WITH_GENERATED_AP_PASSWORD"
+
+captive_portal:
+
+spi:
+  clk_pin: GPIO7
+  mosi_pin: GPIO9
+
+output:
+  - platform: gpio
+    pin: GPIO21
+    id: battery_measure_enable
+
+sensor:
+  - platform: adc
+    pin: GPIO1
+    id: battery_voltage
+    name: Battery Voltage
+    update_interval: never
+    attenuation: 12db
+    filters:
+      - multiply: 2.0
+
+  - platform: template
+    id: battery_level
+    name: Battery Level
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    update_interval: never
+    lambda: return id(battery_voltage).state;
+    filters:
+      - calibrate_linear:
+          - 4.15 -> 100.0
+          - 3.96 -> 90.0
+          - 3.91 -> 80.0
+          - 3.85 -> 70.0
+          - 3.80 -> 60.0
+          - 3.75 -> 50.0
+          - 3.68 -> 40.0
+          - 3.58 -> 30.0
+          - 3.49 -> 20.0
+          - 3.41 -> 10.0
+          - 3.30 -> 5.0
+          - 3.27 -> 0.0
+      - clamp:
+          min_value: 0
+          max_value: 100
+
+  - platform: homeassistant
+    id: outside_temperature
+    entity_id: weather.forecast_home
+    attribute: temperature
+
+  - platform: homeassistant
+    id: budget_spent
+    entity_id: sensor.household_budget_spent_month
+
+  - platform: homeassistant
+    id: budget_remaining
+    entity_id: sensor.household_budget_remaining_month
+
+  - platform: homeassistant
+    id: budget_person_1
+    entity_id: sensor.household_budget_person_1_month
+
+  - platform: homeassistant
+    id: budget_person_2
+    entity_id: sensor.household_budget_person_2_month
+
+text_sensor:
+  - platform: homeassistant
+    id: weather_condition
+    entity_id: weather.forecast_home
+
+binary_sensor:
+  - platform: homeassistant
+    id: away_mode
+    entity_id: input_boolean.ai_away_mode
+
+  - platform: homeassistant
+    id: front_door
+    entity_id: binary_sensor.front_door_sensor
+  - platform: homeassistant
+    id: front_lock
+    entity_id: binary_sensor.front_door_lock
+
+  - platform: homeassistant
+    id: garage_door
+    entity_id: binary_sensor.inside_garage_door
+  - platform: homeassistant
+    id: garage_lock
+    entity_id: binary_sensor.inside_garage_door_lock
+
+  - platform: homeassistant
+    id: deck_door
+    entity_id: binary_sensor.deck_door
+  - platform: homeassistant
+    id: deck_lock
+    entity_id: binary_sensor.deck_door_lock
+
+  - platform: homeassistant
+    id: basement_door
+    entity_id: binary_sensor.front_porch_basement_door_sensor
+  - platform: homeassistant
+    id: basement_lock
+    entity_id: binary_sensor.basement_door_lock
+
+  - platform: homeassistant
+    id: front_person
+    entity_id: binary_sensor.reolink_trackmix_poe_person
+  - platform: homeassistant
+    id: garage_person
+    entity_id: binary_sensor.garage_person
+
+  - platform: gpio
+    id: next_button
+    name: Next Screen Button
+    pin:
+      number: GPIO3
+      mode: INPUT_PULLUP
+      inverted: true
+      allow_other_uses: true
+    on_press:
+      then:
+        - display.page.show_next: epaper_display
+        - component.update: epaper_display
+
+  - platform: gpio
+    id: refresh_button
+    name: Refresh Screen Button
+    pin:
+      number: GPIO4
+      mode: INPUT_PULLUP
+      inverted: true
+      allow_other_uses: true
+    on_press:
+      then:
+        - component.update: battery_voltage
+        - component.update: battery_level
+        - component.update: epaper_display
+
+  - platform: gpio
+    id: previous_button
+    name: Previous Screen Button
+    pin:
+      number: GPIO5
+      mode: INPUT_PULLUP
+      inverted: true
+      allow_other_uses: true
+    on_press:
+      then:
+        - display.page.show_previous: epaper_display
+        - component.update: epaper_display
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+font:
+  - file: "gfonts://Inter@400"
+    id: body_font
+    size: 26
+    glyphsets: []
+    glyphs:
+      - " 0123456789"
+      - "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+      - "abcdefghijklmnopqrstuvwxyz"
+      - "$%.,!?()-/:<>"
+  - file: "gfonts://Inter@700"
+    id: heading_font
+    size: 38
+    glyphsets: []
+    glyphs:
+      - " 0123456789"
+      - "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+      - "abcdefghijklmnopqrstuvwxyz"
+      - "$%.,!?()-/:<>"
+  - file: "gfonts://Inter@700"
+    id: value_font
+    size: 54
+    glyphsets: []
+    glyphs:
+      - " 0123456789"
+      - "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+      - "abcdefghijklmnopqrstuvwxyz"
+      - "$%.,!?()-/:<>"
+
+display:
+  - platform: waveshare_epaper
+    id: epaper_display
+    model: 7.50inv2
+    cs_pin: GPIO10
+    dc_pin: GPIO11
+    reset_pin:
+      number: GPIO12
+      inverted: false
+    busy_pin:
+      number: GPIO13
+      inverted: true
+    update_interval: never
+    pages:
+      - id: home_page
+        lambda: |-
+          auto now = id(ha_time).now();
+          it.printf(24, 18, id(heading_font), "HOME");
+          if (now.is_valid()) {
+            it.strftime(776, 22, id(body_font), TextAlign::TOP_RIGHT,
+                        "%a %b %d  %I:%M %p", now);
+          }
+          it.line(24, 70, 776, 70);
+
+          if (!isnan(id(outside_temperature).state)) {
+            it.printf(24, 90, id(value_font), "%.0f F",
+                      id(outside_temperature).state);
+          } else {
+            it.print(24, 90, id(value_font), "-- F");
+          }
+          it.printf(235, 106, id(body_font), "%s",
+                    id(weather_condition).state.c_str());
+          it.printf(776, 106, id(body_font), TextAlign::TOP_RIGHT,
+                    "Away mode: %s", id(away_mode).state ? "ON" : "OFF");
+
+          it.print(24, 180, id(body_font), "Front");
+          it.printf(190, 180, id(body_font), "%s / %s",
+                    id(front_door).state ? "OPEN" : "CLSD",
+                    id(front_lock).state ? "UNLK" : "LCKD");
+          it.print(430, 180, id(body_font), "Garage");
+          it.printf(776, 180, id(body_font), TextAlign::TOP_RIGHT, "%s / %s",
+                    id(garage_door).state ? "OPEN" : "CLSD",
+                    id(garage_lock).state ? "UNLK" : "LCKD");
+
+          it.print(24, 230, id(body_font), "Deck");
+          it.printf(190, 230, id(body_font), "%s / %s",
+                    id(deck_door).state ? "OPEN" : "CLSD",
+                    id(deck_lock).state ? "UNLK" : "LCKD");
+          it.print(430, 230, id(body_font), "Basement");
+          it.printf(776, 230, id(body_font), TextAlign::TOP_RIGHT, "%s / %s",
+                    id(basement_door).state ? "OPEN" : "CLSD",
+                    id(basement_lock).state ? "UNLK" : "LCKD");
+
+          it.line(24, 290, 776, 290);
+          if (id(front_person).state || id(garage_person).state) {
+            it.print(24, 315, id(heading_font), "PERSON ALERT");
+            if (id(front_person).state) {
+              it.print(330, 322, id(body_font), "Front porch");
+            }
+            if (id(garage_person).state) {
+              it.print(570, 322, id(body_font), "Garage");
+            }
+          } else {
+            it.print(24, 315, id(heading_font), "PERIMETER CLEAR");
+          }
+
+          it.printf(24, 430, id(body_font), "Battery %.0f%%",
+                    id(battery_level).state);
+          it.print(776, 430, id(body_font), TextAlign::TOP_RIGHT,
+                   "< Previous     Green Refresh     Next >");
+
+      - id: budget_page
+        lambda: |-
+          auto now = id(ha_time).now();
+          it.printf(24, 18, id(heading_font), "HOUSEHOLD BUDGET");
+          if (now.is_valid()) {
+            it.strftime(776, 22, id(body_font), TextAlign::TOP_RIGHT,
+                        "%B %Y", now);
+          }
+          it.line(24, 70, 776, 70);
+
+          if (isnan(id(budget_spent).state) ||
+              isnan(id(budget_remaining).state)) {
+            it.print(400, 180, id(heading_font), TextAlign::TOP_CENTER,
+                     "BUDGET SERVICE NOT CONNECTED");
+            it.print(400, 245, id(body_font), TextAlign::TOP_CENTER,
+                     "The Home screen is ready.");
+            it.print(400, 285, id(body_font), TextAlign::TOP_CENTER,
+                     "Budget totals will appear here after setup.");
+          } else {
+            it.print(24, 95, id(body_font), "Spent this month");
+            it.printf(24, 135, id(value_font), "$%.2f",
+                      id(budget_spent).state);
+            it.print(430, 95, id(body_font), "Remaining");
+            it.printf(430, 135, id(value_font), "$%.2f",
+                      id(budget_remaining).state);
+
+            it.line(24, 220, 776, 220);
+            it.print(24, 250, id(body_font), "Member 1");
+            it.printf(24, 290, id(value_font), "$%.2f",
+                      id(budget_person_1).state);
+            it.print(430, 250, id(body_font), "Member 2");
+            it.printf(430, 290, id(value_font), "$%.2f",
+                      id(budget_person_2).state);
+          }
+
+          it.printf(24, 430, id(body_font), "Battery %.0f%%",
+                    id(battery_level).state);
+          it.print(776, 430, id(body_font), TextAlign::TOP_RIGHT,
+                   "< Previous     Green Refresh     Next >");
+
+deep_sleep:
+  id: display_sleep
+  run_duration:
+    default: 90s
+    gpio_wakeup_reason: 90s
+  sleep_duration: 15min
+  esp32_ext1_wakeup:
+    pins:
+      - number: GPIO3
+        allow_other_uses: true
+      - number: GPIO4
+        allow_other_uses: true
+      - number: GPIO5
+        allow_other_uses: true
+    mode: ANY_LOW
