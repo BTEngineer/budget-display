@@ -40,6 +40,20 @@ The authoritative database is `/data/budget.db`. Home Assistant preserves the
 app's `/data` volume across restarts and app updates. Include the app in Home
 Assistant backups and perform a restore test before relying on it.
 
+## Display sensors
+
+The app uses Home Assistant's internal MQTT service to publish read-only,
+retained sensor discovery and current-month states. Supervisor supplies the
+broker credentials at runtime. The stable display entity IDs are:
+
+- `sensor.household_budget_spent_month`
+- `sensor.household_budget_remaining_month`
+- `sensor.household_budget_person_1_month`
+- `sensor.household_budget_person_2_month`
+
+Additional configured members use the same numbered pattern. Sensor
+availability follows the budget app's MQTT connection.
+
 ## Security
 
 Every MCP request requires the bearer token. The server also rejects unlisted

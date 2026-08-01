@@ -23,6 +23,7 @@ from .ledger import (
     BudgetValidationError,
 )
 from .mcp_server import create_server
+from .mqtt_publisher import BudgetMQTTPublisher, MQTTConfig
 
 
 @dataclass(frozen=True)
@@ -234,6 +235,18 @@ def create_http_app(config: HTTPRuntimeConfig):
 
 def main() -> None:
     config = load_runtime_config()
+    ledger = BudgetLedger(
+        config.database,
+        household_timezone=config.household_timezone,
+        members=config.members,
+        categories=config.categories,
+    )
+    ledger.initialize()
+    mqtt_config = MQTTConfig.from_environment()
+    if mqtt_config is not None:
+        BudgetMQTTPublisher(
+            ledger=ledger, members=config.members, config=mqtt_config
+        ).start()
     app = create_http_app(config)
     uvicorn.run(
         app,

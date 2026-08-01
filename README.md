@@ -14,6 +14,8 @@ after installation and is not stored in this repository.
 - The Home Assistant app exposes four authenticated Streamable HTTP MCP tools.
 - Members, categories, subcategories, monthly limits, timezone, allowed hosts,
   and the API token are Home Assistant app options.
+- The app publishes read-only current-month totals through Home Assistant's
+  internal MQTT service for the E1001 budget-only display.
 
 ## Configurable budget structure
 
@@ -56,6 +58,11 @@ tool. The first call for an expense over $500 is rejected until the caller sets
 `confirm_large_expense=true`. This is an advisory client-policy safeguard; the
 server does not independently verify that a person approved the expense.
 
+The app also consumes Home Assistant's internal `mqtt` service and publishes
+retained discovery/state messages for total spent, total remaining, and each
+configured member. Supervisor supplies the MQTT credentials at runtime; they
+are never stored in this repository or the app options.
+
 ## Install in Home Assistant
 
 1. Open **Settings > Apps > App store**.
@@ -83,7 +90,8 @@ cd household_budget_mcp
 python -m unittest discover -s tests -v
 ```
 
-The E1001 template expects these future Home Assistant sensors:
+The E1001 template expects these Home Assistant sensors, which the app creates
+through MQTT discovery:
 
 - `sensor.household_budget_spent_month`
 - `sensor.household_budget_remaining_month`

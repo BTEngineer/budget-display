@@ -206,7 +206,9 @@ display:
           it.line(24, 70, 776, 70);
 
           if (isnan(id(budget_spent).state) ||
-              isnan(id(budget_remaining).state)) {
+              isnan(id(budget_remaining).state) ||
+              isnan(id(budget_person_1).state) ||
+              isnan(id(budget_person_2).state)) {
             it.print(400, 180, id(heading_font), TextAlign::TOP_CENTER,
                      "BUDGET SERVICE NOT CONNECTED");
             it.print(400, 245, id(body_font), TextAlign::TOP_CENTER,

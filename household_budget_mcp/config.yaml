@@ -1,6 +1,6 @@
 name: "Household Budget MCP"
 description: "Private household budget ledger and authenticated MCP endpoint"
-version: "0.4.0"
+version: "0.5.0"
 slug: "household_budget_mcp"
 url: "https://github.com/BTEngineer/budget-display"
 init: false
@@ -8,6 +8,8 @@ startup: application
 boot: auto
 arch:
   - amd64
+services:
+  - mqtt:need
 ports:
   8099/tcp: 8099
 ports_description:
