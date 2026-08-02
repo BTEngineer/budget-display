@@ -3,6 +3,15 @@
 This app hosts the household SQLite ledger and its narrow MCP interface on Home
 Assistant OS.
 
+## Release status
+
+Version 0.8.0 is implemented and published on the repository's `main` branch.
+The server-side transaction search and refund work that was previously recorded
+as a change plan is now shipped behavior and is documented below in the present
+tense. The Home Assistant app update, Hermes configuration rollout, and live
+financial verification remain separate operational steps; publishing the source
+does not perform those actions automatically.
+
 ## Configuration
 
 Set `api_token` to a randomly generated value containing at least 32
@@ -64,14 +73,24 @@ configuration tools.
 
 ## Transaction search and refunds
 
-This section consolidates refund behavior with the server-side transaction
-recall contract prepared for the Hermes Home budget journal.
+This section documents the implemented refund behavior and server-side
+transaction recall contract for the Hermes Home budget journal.
 
-The additions are:
+Version 0.8.0 implements:
 
 - `search_transactions`: authoritative, authenticated, bounded, paginated
   transaction recall across complete ledger history.
 - `refund_expense`: an audit-preserving linked or unlinked refund.
+- stable opaque transaction IDs and automatic migration of legacy entries;
+- a distinct business-name field and canonical expense, refund, and reversal
+  records;
+- signed, filter-bound keyset cursors with deterministic ordering; and
+- backward-compatible mutation responses that add a canonical `transaction`
+  object without removing the established top-level fields.
+
+The original plan item named `list_recent_expenses` was superseded by
+`search_transactions`, which supports recent lookup plus complete-history
+reconciliation and includes category and business-name filtering.
 
 The server remains the source of truth. Hermes notes or journals are derived
 context and must not be used to calculate authoritative totals.
@@ -130,16 +149,16 @@ string lengths, timestamps, decimal bounds, and the start/end relationship.
 
 The response contains `transactions`, `next_cursor`, `has_more`, and `count`.
 Ordering is deterministic by `occurred_at` and then stable transaction ID in
-the requested direction. Pagination must use a stable cursor position so
-identical timestamps and concurrent inserts do not silently skip or duplicate
-records. It must not expose database row IDs, SQL cursors, authorization data,
-stack traces, or filesystem paths.
+the requested direction. Pagination uses a stable, signed cursor position so
+identical timestamps do not silently skip or duplicate records. Responses do
+not expose database row IDs, SQL cursors, authorization data, stack traces, or
+filesystem paths.
 
-For a refund lookup, results should normally request `operation_type: expense`
+For a refund lookup, clients should normally request `operation_type: expense`
 and include each expense's remaining refundable amount. For complete journal
-reconciliation, Hermes uses explicit calendar boundaries, `status: all`,
-ascending order, a bounded page size, and follows every cursor before treating
-the period as complete.
+reconciliation, a Hermes client should use explicit calendar boundaries,
+`status: all`, ascending order, a bounded page size, and follow every cursor
+before treating the period as complete.
 
 ### `refund_expense`
 
@@ -179,9 +198,11 @@ decimal together with `operation_type: refund`; the ledger applies it as a
 credit. This avoids requiring clients to infer the operation from a numeric
 sign while retaining the existing signed accounting behavior internally.
 
-### Conversational resolution
+### Hermes client contract
 
-Hermes should use any member, category, or business-name clues to call
+The server-side operations needed for conversational resolution are
+implemented. During the separate Hermes rollout, Hermes should use any member,
+category, or business-name clues to call
 `search_transactions`. One clear match can be refunded as a linked
 transaction. Ambiguous matches require clarification. No match does not block
 the refund: after obtaining an exact amount, member, and category, Hermes may
@@ -206,62 +227,65 @@ work. Queries, limits, identifiers, and cursors are bounded; malformed or
 tampered cursors fail closed. Normal logs must not contain complete transaction
 histories, bearer values, or credential-bearing exception details.
 
-After this server version is separately deployed, the Hermes Home allowlist
-must contain exactly these six tools. Resources, prompts, and parallel tool
-calls remain disabled. The existing Hermes journal plan's earlier five-tool
-assumption must therefore be updated before that client-side work is
-implemented.
+The server and `hermes-config.example.yaml` now define the exact six-tool
+allowlist. A live Hermes deployment still needs to adopt that allowlist.
+Resources, prompts, and parallel tool calls remain disabled. Any older Hermes
+journal material that assumes five tools is obsolete and must be updated before
+that client-side work is enabled.
 
-### Persistence and query requirements
+### Persistence and query implementation
 
-Search, refunds, totals, and undo must use the same authoritative ledger; do
-not create a Hermes-specific transaction table. Business name should be stored
-as a distinct field so merchant filtering does not depend on parsing the
-description. Historical rows need explicit migration or fallback behavior for
-new canonical fields.
+Search, refunds, totals, and undo use the same authoritative SQLite ledger; no
+Hermes-specific transaction table was added. Business name is stored as a
+distinct field, so merchant filtering does not depend on parsing the
+description. Startup migration adds the new canonical columns, classifies
+legacy reversals, and assigns stable opaque transaction IDs to historical rows
+without deleting ledger history.
 
-Inspect the existing schema and query plans before selecting indexes. Expected
-lookup needs include stable transaction and request IDs, occurrence time plus a
-stable tie-breaker, member, category, operation/status, and literal business or
-description search. Cursor pagination should use keyset or an equivalently
-stable strategy rather than a mutable offset.
+The schema includes a unique transaction-ID index, an occurrence-time plus
+transaction-ID search-order index, and a refund-relationship index. Search uses
+keyset pagination rather than a mutable offset. Member, category,
+operation/status, amount, ID, and literal business or description filters are
+applied to the authoritative ledger query.
 
-The current one-reversal-per-expense relationship must remain valid for undo,
+The existing one-reversal-per-expense relationship remains valid for undo,
 while the refund relationship permits multiple partial refunds. Aggregate
-queries must count each credit once and must continue producing the established
-monthly, member, and parent/child category totals.
+queries count each credit once and continue producing the established monthly,
+member, and parent/child category totals.
 
-### Required validation
+### Validation status
 
-Server tests must cover:
+The 0.8.0 source delivery passed 53 automated tests plus Python, JavaScript,
+JSON, lockfile, requirements-export, archive, and Git whitespace checks. The
+automated suite covers:
 
 - canonical expense, reversal, linked-refund, and unlinked-refund records;
 - exact idempotent retries and conflicting request-ID reuse;
 - full and partial refunds, multiple partial refunds, over-refund rejection,
   and refund-month accounting;
-- every search filter alone and in combination, including top-level category
-  descendants and literal business-name matching;
-- inclusive start and exclusive end bounds across local DST and month edges;
-- minimum, maximum, default, and invalid limits;
-- multiple pages containing identical timestamps, with no omissions or
-  duplicates;
-- malformed or tampered cursors and the documented concurrent-insert behavior;
-- Unicode, newlines, and instruction-shaped descriptions treated only as data;
-- missing, invalid, and rotated bearer tokens plus secret-redacted failures;
+- search filter families, including top-level category descendants, literal
+  business-name matching, time and amount bounds, identifiers, operation type,
+  and status;
+- stable filter-bound pagination and malformed or tampered cursor rejection;
+- legacy schema migration and preservation of existing historical records;
+- missing, invalid, and undersized bearer tokens plus Host-header rejection;
 - unchanged totals, category behavior, large-expense confirmation, MCP
   resources/prompts, and existing client response compatibility.
 
-Run the applicable unit, integration, formatting, lint, type, migration, and
-MCP protocol checks. Live financial mutations require separate approval and a
-documented reversal or cleanup procedure.
+Live Home Assistant migration/readback, backup restoration, Hermes end-to-end
+reconciliation, token rotation, and live financial mutations are operational
+validation steps rather than claims established by the source test suite. Live
+financial mutations require separate approval and a documented reversal or
+cleanup procedure.
 
-### Delivery boundary
+### Delivery status and operational boundary
 
-Publishing should use a feature branch, stage only intended server files, run
-and record the relevant tests, push the branch, and open a draft pull request
-describing the contracts, migration, compatibility, security, pagination, and
-test results. Stop after the draft PR. Do not merge, deploy, restart, rotate
-credentials, or modify the live budget service as part of that delivery.
+The planned source-delivery workflow is complete: the implementation was
+reviewed on a feature branch, validated, pushed, and merged to `main` through
+pull request #3. That source delivery did not itself deploy or restart the live
+Home Assistant app, alter Hermes configuration, rotate credentials, or perform
+live financial mutations. Those remain separately controlled operational
+actions.
 
 ## Persistence and backup
 
@@ -289,10 +313,10 @@ second-member total, and combined total for the E1001. The current display fits
 six category rows. Parent rows aggregate their child categories; child rows are
 also published as detail, and the household total counts each expense once.
 
-Version 0.7 also publishes dashboard-oriented numeric sensors for total budget,
-percentage used, last update, and stable per-top-level-category budget, spent,
-remaining, and percentage values. The original numbered category strings are
-unchanged for E1001 compatibility.
+Version 0.8.0 continues publishing the dashboard-oriented numeric sensors
+introduced in 0.7 for total budget, percentage used, last update, and stable
+per-top-level-category budget, spent, remaining, and percentage values. The
+original numbered category strings remain unchanged for E1001 compatibility.
 
 ## Security
 
