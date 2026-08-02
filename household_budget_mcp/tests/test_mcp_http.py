@@ -226,6 +226,28 @@ class BudgetMCPHTTPTests(unittest.TestCase):
         with self.assertRaisesRegex(BudgetValidationError, "unknown category"):
             load_runtime_config(options)
 
+    def test_classification_alias_uniqueness_uses_normalized_whitespace(self) -> None:
+        options = Path(self.temporary_directory.name) / "options.json"
+        options.write_text(
+            json.dumps(
+                {
+                    "api_token": TOKEN,
+                    "allowed_hosts": ["testserver"],
+                    "members": ["Alpha"],
+                    "categories": [
+                        {"name": "Primary", "parent": "", "monthly_budget": "10.00"}
+                    ],
+                    "classification_aliases": [
+                        {"term": "local market", "category": "Primary"},
+                        {"term": "local   market", "category": "Primary"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BudgetValidationError, "must be unique"):
+            load_runtime_config(options)
+
     def test_unknown_category_parent_fails_closed(self) -> None:
         options = Path(self.temporary_directory.name) / "options.json"
         options.write_text(

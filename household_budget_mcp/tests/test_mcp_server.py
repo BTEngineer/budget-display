@@ -111,6 +111,31 @@ class BudgetMCPServerTests(unittest.TestCase):
         self.assertFalse(accepted.is_error)
         self.assertEqual(accepted.structured_content["amount_cents"], 60000)
 
+    def test_prepare_and_commit_share_the_description_limit(self) -> None:
+        arguments = {
+            "request_id": "description-limit",
+            "member": "Member 1",
+            "category": "Everyday",
+            "amount": "600.00",
+            "description": "x" * 1000,
+            "occurred_at": "2026-08-02T09:00:00-04:00",
+        }
+        prepared = self.call("prepare_expense", arguments)
+        self.assertFalse(prepared.is_error)
+        committed = self.call(
+            "add_expense",
+            {
+                **arguments,
+                "confirmation_token": prepared.structured_content["confirmation_token"],
+            },
+        )
+        self.assertFalse(committed.is_error)
+        self.assertEqual(len(committed.structured_content["transaction"]["description"]), 1000)
+
+        too_long = {**arguments, "request_id": "description-too-long", "description": "x" * 1001}
+        self.assertTrue(self.call("prepare_expense", too_long).is_error)
+        self.assertTrue(self.call("add_expense", too_long).is_error)
+
     def test_new_write_and_read_tools_round_trip_through_mcp(self) -> None:
         original = self.call(
             "add_expense",

@@ -34,7 +34,9 @@ replace them in the app's Home Assistant **Configuration** tab.
   its own `monthly_budget` blank.
 - Category paths and member names must be unique, ignoring capitalization.
 - Optional classification aliases map household merchant terms to exact
-  categories. They only influence read-only suggestions and never auto-post.
+  categories. They match lexical boundaries, only influence read-only
+  suggestions, and never auto-post. Historical evidence counts one source
+  purchase per category even when a split has repeated allocations.
 - When a month is first queried, its limits are snapshotted. Later default
   changes therefore do not rewrite historical months.
 - Removing a configured member or category prevents new expenses under that
@@ -85,7 +87,8 @@ timestamp that must be passed unchanged to the committing tool.
 `correct_expense` atomically records a linked reversal and replacement, never
 an in-place edit. Corrections whose resolved replacement exceeds $500 require
 an exact token from `prepare_correction`. Individual split allocations cannot
-be corrected because doing so would break split reconciliation.
+be corrected because doing so would break split reconciliation. No-op
+corrections are rejected without adding reversal records.
 `add_split_expense` records all allocations or none and requires their amounts
 to equal the stated total. Classification and outlook tools are read-only; a
 category suggestion never authorizes a ledger write.

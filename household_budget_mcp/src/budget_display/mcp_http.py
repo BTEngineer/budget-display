@@ -132,7 +132,7 @@ def _load_classification_aliases(
     for item in value:
         if not isinstance(item, dict):
             raise BudgetValidationError("each classification alias must be an object")
-        term = str(item.get("term", "")).strip()
+        term = " ".join(str(item.get("term", "")).split())
         category = str(item.get("category", "")).strip()
         if not term or len(term) > 100:
             raise BudgetValidationError(

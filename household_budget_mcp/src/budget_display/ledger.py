@@ -11,6 +11,7 @@ import calendar
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -932,7 +933,7 @@ class BudgetLedger:
     ) -> dict[str, object]:
         """Prepare an exact correction for explicit confirmation."""
         with self._connection() as connection:
-            original, _, payload, _ = self._resolve_correction(
+            original, resolved, payload, _ = self._resolve_correction(
                 connection,
                 request_id=request_id,
                 transaction_id=transaction_id,
@@ -950,6 +951,10 @@ class BudgetLedger:
             if original["split_group_id"] is not None:
                 raise BudgetValidationError(
                     "individual split allocations cannot be corrected"
+                )
+            if self._correction_is_noop(original, resolved):
+                raise BudgetValidationError(
+                    "correction must change at least one expense field"
                 )
             expires_at = datetime.now(timezone.utc) + timedelta(
                 seconds=CONFIRMATION_TTL_SECONDS
@@ -1043,6 +1048,10 @@ class BudgetLedger:
             if original["split_group_id"] is not None:
                 raise BudgetValidationError(
                     "individual split allocations cannot be corrected"
+                )
+            if self._correction_is_noop(original, payload):
+                raise BudgetValidationError(
+                    "correction must change at least one expense field"
                 )
             if resolved_cents > LARGE_EXPENSE_CENTS:
                 if not confirmation_token:
@@ -1770,7 +1779,11 @@ class BudgetLedger:
             raise BudgetValidationError("business_name or description is required")
         if not 1 <= limit <= 10:
             raise BudgetValidationError("limit must be between 1 and 10")
-        haystack = " ".join(part for part in (business_name, description) if part).casefold()
+        haystack = " ".join(
+            " ".join(part for part in (business_name, description) if part)
+            .casefold()
+            .split()
+        )
         candidates: dict[str, dict[str, object]] = {}
 
         def offer(
@@ -1793,13 +1806,14 @@ class BudgetLedger:
 
         with self._connection() as connection:
             for term, category in self.classification_aliases:
-                clean_term = term.strip()
+                clean_term = " ".join(term.split())
                 if not clean_term:
                     continue
                 category_id = self._category_id(connection, category)
-                if clean_term.casefold() == haystack:
+                normalized_term = clean_term.casefold()
+                if normalized_term == haystack:
                     score, reason = 100, "exact configured alias"
-                elif clean_term.casefold() in haystack:
+                elif self._contains_alias(haystack, normalized_term):
                     score, reason = 90, "configured alias"
                 else:
                     continue
@@ -1812,7 +1826,9 @@ class BudgetLedger:
             if business_name:
                 rows = connection.execute(
                     """
-                    SELECT category.id AS category_id, COUNT(*) AS uses,
+                    SELECT category.id AS category_id,
+                           COUNT(DISTINCT COALESCE(entry.split_group_id,
+                                                   entry.transaction_id)) AS uses,
                            MAX(entry.occurred_at) AS last_used_at
                     FROM ledger_entries entry
                     JOIN categories category ON category.id = entry.category_id
@@ -2265,6 +2281,28 @@ class BudgetLedger:
             payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _contains_alias(haystack: str, normalized_term: str) -> bool:
+        """Match an alias without accepting it inside a larger word."""
+        prefix = r"(?<!\w)" if normalized_term[0].isalnum() else ""
+        suffix = r"(?!\w)" if normalized_term[-1].isalnum() else ""
+        return re.search(f"{prefix}{re.escape(normalized_term)}{suffix}", haystack) is not None
+
+    @staticmethod
+    def _correction_is_noop(
+        original: sqlite3.Row, payload: Mapping[str, object]
+    ) -> bool:
+        return all(
+            (
+                int(payload["member_id"]) == int(original["member_id"]),
+                int(payload["category_id"]) == int(original["category_id"]),
+                int(payload["amount_cents"]) == int(original["amount_cents"]),
+                str(payload["business_name"]) == str(original["business_name"]),
+                str(payload["description"]) == str(original["description"]),
+                str(payload["occurred_at"]) == str(original["occurred_at"]),
+            )
+        )
 
     def _resolve_correction(
         self,

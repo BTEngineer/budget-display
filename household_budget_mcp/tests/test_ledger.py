@@ -783,6 +783,32 @@ class BudgetLedgerTests(unittest.TestCase):
                 amount="19.00",
             )
 
+    def test_noop_corrections_are_rejected_without_audit_noise(self) -> None:
+        original = self.ledger.add_expense(
+            request_id="noop-original",
+            member="Member 1",
+            category="Everyday",
+            amount="10.00",
+            business_name="Shop",
+            description="Original",
+            occurred_at="2026-08-02T09:00:00-04:00",
+        )
+        transaction_id = original["transaction"]["transaction_id"]
+        with self.assertRaisesRegex(BudgetValidationError, "change at least one"):
+            self.ledger.prepare_correction(
+                request_id="noop-prepare",
+                transaction_id=transaction_id,
+                amount="10.00",
+            )
+        with self.assertRaisesRegex(BudgetValidationError, "change at least one"):
+            self.ledger.correct_expense(
+                request_id="noop-correction",
+                transaction_id=transaction_id,
+            )
+        history = self.ledger.search_transactions(status="all")["transactions"]
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["status"], "active")
+
     def test_split_expense_is_atomic_balanced_and_idempotent(self) -> None:
         values = {
             "request_id": "split-1",
@@ -841,6 +867,35 @@ class BudgetLedgerTests(unittest.TestCase):
         self.assertEqual(history["suggestions"][0]["category"], "Occasional")
         self.assertTrue(history["requires_explicit_category"])
         self.assertEqual(ledger.list_spending(month=datetime.now().strftime("%Y-%m"))["spent_cents"], 400)
+
+    def test_classification_aliases_use_boundaries_and_splits_count_once(self) -> None:
+        database = Path(self.temporary_directory.name) / "classification-regressions.db"
+        ledger = BudgetLedger(
+            database,
+            classification_aliases=(("mart", "Meals/Food"),),
+        )
+        ledger.initialize()
+        false_positive = ledger.suggest_expense_classification(business_name="Walmart")
+        self.assertEqual(false_positive["suggestions"], [])
+        boundary_match = ledger.suggest_expense_classification(
+            business_name="Neighborhood Mart"
+        )
+        self.assertEqual(boundary_match["suggestions"][0]["category"], "Meals/Food")
+
+        ledger.add_split_expense(
+            request_id="classification-split",
+            total_amount="30.00",
+            allocations=[
+                {"member": "Member 1", "category": "Everyday", "amount": "10.00"},
+                {"member": "Member 2", "category": "Everyday", "amount": "20.00"},
+            ],
+            business_name="Warehouse Club",
+        )
+        history = ledger.suggest_expense_classification(
+            business_name="Warehouse Club"
+        )
+        self.assertEqual(history["suggestions"][0]["category"], "Everyday")
+        self.assertEqual(history["suggestions"][0]["sample_count"], 1)
 
     def test_budget_outlook_calculates_projection_comparison_and_risk(self) -> None:
         self.ledger.add_expense(

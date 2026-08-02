@@ -13,11 +13,16 @@ from typing import Any
 
 from mcp.server import MCPServer
 
-from .ledger import BudgetLedger, BudgetValidationError, LARGE_EXPENSE_CENTS
+from .ledger import (
+    BudgetLedger,
+    BudgetValidationError,
+    LARGE_EXPENSE_CENTS,
+    MAX_ENTRY_DESCRIPTION_LENGTH,
+)
 
 
 MAX_REQUEST_ID_LENGTH = 200
-MAX_DESCRIPTION_LENGTH = 500
+MAX_DESCRIPTION_LENGTH = MAX_ENTRY_DESCRIPTION_LENGTH
 MAX_BUSINESS_NAME_LENGTH = 200
 
 

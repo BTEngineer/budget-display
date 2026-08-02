@@ -36,6 +36,7 @@ local calendar month receives each expense.
 Optional `classification_aliases` entries contain `term` and `category`.
 Categories must be exact configured paths such as `Meals/Food`. Aliases affect
 only `suggest_expense_classification`; they never choose a category for a write.
+Terms match at lexical boundaries rather than arbitrary substrings.
 
 ## Hermes endpoint
 
@@ -70,6 +71,11 @@ caller omitted it from the prepare request, the returned timestamp must be
 passed unchanged to the committing tool. This prevents a reviewed transaction
 from crossing a day or month boundary before it is recorded.
 
+Descriptions have one shared 1,000-character limit across preparation, token
+validation, direct writes, corrections, splits, refunds, and classification.
+This prevents a prepared payload from being rejected by the committing tool
+solely because the two boundaries applied different limits.
+
 ## MCP tool surface
 
 The MCP server exposes thirteen tools:
@@ -100,7 +106,8 @@ the fields that need to change. In one immediate SQLite transaction, it creates
 a reversal linked to the original and an active replacement linked back to the
 original. It rejects refunded, already reversed, missing, and non-expense
 targets. Exact retries are idempotent; conflicting reuse of the request ID is
-rejected. No historical row is overwritten.
+rejected. No historical row is overwritten. A correction that resolves to the
+same persisted fields is rejected without creating a reversal or replacement.
 
 If the fully resolved replacement is over $500, `prepare_correction` is
 mandatory. Its signed token binds the target transaction, request ID, resolved
@@ -129,6 +136,11 @@ exact prior business-name history, and low-confidence category-name matches.
 Every result includes its reason, confidence, sample count, and last-use time
 where applicable. The response explicitly requires the caller to provide an
 exact category to a later write operation.
+
+Configured aliases match complete lexical terms, preventing aliases embedded
+inside larger words from producing false positives. Merchant history counts a
+split group only once per category, so allocating one purchase across multiple
+members does not inflate its classification evidence.
 
 ### Budget outlook
 
@@ -327,13 +339,18 @@ member, and parent/child category totals.
 
 ### Validation status
 
-The version 0.9.1 development suite passes 67 automated tests. P1 regression
+The version 0.9.1 development suite passes 71 automated tests. P1 regression
 coverage includes large-correction preparation and mutation rejection, the
 exact $500 correction boundary, concrete single/split occurrence timestamps,
 month-boundary preservation, historical outlooks before and after a correction,
 and fail-closed split-allocation correction. Existing coverage continues to
 exercise atomic balanced splits, idempotency, classification, refunds, search,
 authentication, and the complete thirteen-tool MCP contract.
+
+P2 regression coverage verifies the shared 1,000-character prepare/commit
+description boundary, lexical alias matching, one classification-history sample
+per split source purchase and category, and no-op correction rejection without
+audit-log noise.
 
 The 0.8.0 source delivery passed 53 automated tests plus Python, JavaScript,
 JSON, lockfile, requirements-export, archive, and Git whitespace checks. The
