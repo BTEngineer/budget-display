@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -704,6 +705,173 @@ class BudgetLedgerTests(unittest.TestCase):
         ledger.initialize()
         second = ledger.search_transactions(status="all", sort_order="ascending")
         self.assertEqual(ids, [row["transaction_id"] for row in second["transactions"]])
+
+    def test_confirmation_token_is_bound_to_exact_expense(self) -> None:
+        values = {
+            "request_id": "confirm-1",
+            "member": "Member 1",
+            "category": "Everyday",
+            "amount": "600.00",
+            "business_name": "Furniture Store",
+            "description": "Desk",
+            "occurred_at": "2026-08-01T09:00:00-04:00",
+        }
+        prepared = self.ledger.prepare_expense(**values)
+        self.ledger.validate_expense_confirmation(
+            token=prepared["confirmation_token"], **values
+        )
+        with self.assertRaisesRegex(BudgetValidationError, "does not match"):
+            self.ledger.validate_expense_confirmation(
+                token=prepared["confirmation_token"],
+                **{**values, "amount": "601.00"},
+            )
+        with self.assertRaisesRegex(BudgetValidationError, "invalid"):
+            self.ledger.validate_expense_confirmation(token="tampered", **values)
+
+    def test_correction_reverses_and_replaces_atomically_and_idempotently(self) -> None:
+        original = self.ledger.add_expense(
+            request_id="original-correction",
+            member="Member 1",
+            category="Everyday",
+            amount="20.00",
+            business_name="Shop",
+            occurred_at="2026-08-02T09:00:00-04:00",
+        )
+        values = {
+            "request_id": "correction-1",
+            "transaction_id": original["transaction"]["transaction_id"],
+            "category": "Occasional",
+            "amount": "25.00",
+            "description": "Corrected purchase",
+        }
+        corrected = self.ledger.correct_expense(**values)
+        duplicate = self.ledger.correct_expense(**values)
+        self.assertFalse(corrected["duplicate"])
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(corrected["replacement"], duplicate["replacement"])
+        self.assertEqual(corrected["replacement"]["category"], "Occasional")
+        self.assertEqual(corrected["replacement"]["amount"], "25.00")
+        self.assertEqual(
+            corrected["replacement"]["corrects_transaction_id"],
+            original["transaction"]["transaction_id"],
+        )
+        self.assertEqual(
+            corrected["original"]["corrected_by_transaction_id"],
+            corrected["replacement"]["transaction_id"],
+        )
+        self.assertEqual(self.ledger.list_spending(month="2026-08")["spent_cents"], 2500)
+        with self.assertRaisesRegex(DuplicateRequestError, "different ledger operation"):
+            self.ledger.correct_expense(**{**values, "amount": "26.00"})
+
+    def test_refunded_expense_cannot_be_corrected(self) -> None:
+        original = self.ledger.add_expense(
+            request_id="refund-before-correction",
+            member="Member 1",
+            category="Everyday",
+            amount="20.00",
+        )
+        self.ledger.refund_expense(
+            request_id="refund-partial",
+            expense_id=original["transaction"]["transaction_id"],
+            amount="1.00",
+        )
+        with self.assertRaisesRegex(BudgetValidationError, "refunded"):
+            self.ledger.correct_expense(
+                request_id="correction-refunded",
+                transaction_id=original["transaction"]["transaction_id"],
+                amount="19.00",
+            )
+
+    def test_split_expense_is_atomic_balanced_and_idempotent(self) -> None:
+        values = {
+            "request_id": "split-1",
+            "total_amount": "30.00",
+            "allocations": [
+                {"member": "Member 1", "category": "Everyday", "amount": "10.00"},
+                {"member": "Member 2", "category": "Meals/Food", "amount": "20.00"},
+            ],
+            "business_name": "Warehouse",
+            "occurred_at": "2026-08-03T09:00:00-04:00",
+        }
+        first = self.ledger.add_split_expense(**values)
+        duplicate = self.ledger.add_split_expense(**values)
+        self.assertFalse(first["duplicate"])
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(first["split_transaction_id"], duplicate["split_transaction_id"])
+        self.assertEqual(len(first["allocations"]), 2)
+        self.assertTrue(
+            all(row["request_id"] == "split-1" for row in first["allocations"])
+        )
+        searched = self.ledger.search_transactions(request_id="split-1")
+        self.assertEqual(searched["count"], 2)
+        self.assertTrue(
+            all(row["split_transaction_id"] for row in searched["transactions"])
+        )
+        summary = self.ledger.list_spending(month="2026-08")
+        self.assertEqual(summary["spent_cents"], 3000)
+        self.assertEqual(summary["by_member_cents"]["Member 1"], 1000)
+        self.assertEqual(summary["by_member_cents"]["Member 2"], 2000)
+        with self.assertRaisesRegex(BudgetValidationError, "add up exactly"):
+            self.ledger.add_split_expense(
+                request_id="split-invalid",
+                total_amount="31.00",
+                allocations=values["allocations"],
+            )
+        self.assertEqual(self.ledger.list_spending(month="2026-08")["spent_cents"], 3000)
+
+    def test_classification_uses_aliases_and_history_without_writing(self) -> None:
+        database = Path(self.temporary_directory.name) / "classification.db"
+        ledger = BudgetLedger(
+            database,
+            classification_aliases=(("corner shop", "Meals/Food"),),
+        )
+        ledger.initialize()
+        alias = ledger.suggest_expense_classification(business_name="Corner Shop")
+        self.assertEqual(alias["suggestions"][0]["category"], "Meals/Food")
+        self.assertEqual(alias["suggestions"][0]["confidence"], "high")
+        ledger.add_expense(
+            request_id="classification-history",
+            member="Member 1",
+            category="Occasional",
+            amount="4.00",
+            business_name="Book Barn",
+        )
+        history = ledger.suggest_expense_classification(business_name="Book Barn")
+        self.assertEqual(history["suggestions"][0]["category"], "Occasional")
+        self.assertTrue(history["requires_explicit_category"])
+        self.assertEqual(ledger.list_spending(month=datetime.now().strftime("%Y-%m"))["spent_cents"], 400)
+
+    def test_budget_outlook_calculates_projection_comparison_and_risk(self) -> None:
+        self.ledger.add_expense(
+            request_id="outlook-current",
+            member="Member 1",
+            category="Everyday",
+            amount="600.00",
+            occurred_at="2026-08-10T09:00:00-04:00",
+        )
+        self.ledger.add_expense(
+            request_id="outlook-previous",
+            member="Member 1",
+            category="Everyday",
+            amount="300.00",
+            occurred_at="2026-07-10T09:00:00-04:00",
+        )
+        self.ledger.add_expense(
+            request_id="outlook-future-dated",
+            member="Member 1",
+            category="Everyday",
+            amount="100.00",
+            occurred_at="2026-08-20T09:00:00-04:00",
+        )
+        outlook = self.ledger.get_budget_outlook(
+            month="2026-08", as_of="2026-08-10T12:00:00-04:00"
+        )
+        self.assertEqual(outlook["elapsed_days"], 10)
+        self.assertEqual(outlook["spent_cents"], 60000)
+        self.assertEqual(outlook["projected_month_end_cents"], 186000)
+        self.assertEqual(outlook["previous_same_point_cents"], 30000)
+        self.assertEqual(outlook["pace_change_cents"], 30000)
+        self.assertEqual(outlook["categories_at_risk"][0]["category"], "Everyday")
 
 
 if __name__ == "__main__":

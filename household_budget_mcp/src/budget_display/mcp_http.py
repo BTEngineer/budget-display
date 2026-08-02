@@ -35,6 +35,7 @@ class HTTPRuntimeConfig:
     allowed_hosts: tuple[str, ...]
     members: tuple[str, ...] = DEFAULT_MEMBERS
     categories: tuple[tuple[str, str | None, int | None], ...] = DEFAULT_CATEGORIES
+    classification_aliases: tuple[tuple[str, str], ...] = ()
     household_timezone: str = "America/New_York"
     bind_host: str = "0.0.0.0"
     port: int = 8099
@@ -109,6 +110,46 @@ def _load_categories(
     return tuple(parsed)
 
 
+def _load_classification_aliases(
+    value: object,
+    categories: tuple[tuple[str, str | None, int | None], ...],
+) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise BudgetValidationError("classification_aliases must be a list")
+    roots_with_children = {
+        parent.casefold() for _, parent, _ in categories if parent is not None
+    }
+    valid_paths = {
+        ((parent + "/") if parent else "") + name
+        for name, parent, _ in categories
+        if parent is not None or name.casefold() not in roots_with_children
+    }
+    canonical = {path.casefold(): path for path in valid_paths}
+    parsed: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise BudgetValidationError("each classification alias must be an object")
+        term = str(item.get("term", "")).strip()
+        category = str(item.get("category", "")).strip()
+        if not term or len(term) > 100:
+            raise BudgetValidationError(
+                "classification alias terms need 1 to 100 characters"
+            )
+        if term.casefold() in seen:
+            raise BudgetValidationError("classification alias terms must be unique")
+        matched = canonical.get(category.casefold())
+        if matched is None:
+            raise BudgetValidationError(
+                f"classification alias references unknown category: {category}"
+            )
+        seen.add(term.casefold())
+        parsed.append((term, matched))
+    return tuple(parsed)
+
+
 class StaticTokenVerifier(TokenVerifier):
     """Constant-time verifier for the single Hermes service token."""
 
@@ -178,6 +219,9 @@ def load_runtime_config(
     categories = _load_categories(
         options.get("categories", default_category_options)
     )
+    classification_aliases = _load_classification_aliases(
+        options.get("classification_aliases", []), categories
+    )
     household_timezone = str(
         options.get("household_timezone", "America/New_York")
     ).strip()
@@ -198,6 +242,7 @@ def load_runtime_config(
         allowed_hosts=hosts,
         members=members,
         categories=categories,
+        classification_aliases=classification_aliases,
         household_timezone=household_timezone,
         bind_host=bind_host,
         port=port,
@@ -211,6 +256,7 @@ def create_http_app(config: HTTPRuntimeConfig):
         household_timezone=config.household_timezone,
         members=config.members,
         categories=config.categories,
+        classification_aliases=config.classification_aliases,
     )
     ledger.initialize()
     server = create_server(ledger)
@@ -248,6 +294,7 @@ def main() -> None:
         household_timezone=config.household_timezone,
         members=config.members,
         categories=config.categories,
+        classification_aliases=config.classification_aliases,
     )
     ledger.initialize()
     mqtt_config = MQTTConfig.from_environment()

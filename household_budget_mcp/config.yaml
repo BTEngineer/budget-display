@@ -1,6 +1,6 @@
 name: "Household Budget MCP"
 description: "Private household budget ledger, HA dashboard API, and authenticated MCP endpoint"
-version: "0.8.0"
+version: "0.9.0"
 slug: "household_budget_mcp"
 url: "https://github.com/BTEngineer/budget-display"
 init: false
@@ -38,6 +38,9 @@ options:
     - name: "Drinks"
       parent: "Meals"
       monthly_budget: ""
+  classification_aliases:
+    - term: "grocery store"
+      category: "Meals/Food"
 schema:
   api_token: password
   allowed_hosts:
@@ -49,3 +52,6 @@ schema:
     - name: str
       parent: str
       monthly_budget: str
+  classification_aliases:
+    - term: str
+      category: str

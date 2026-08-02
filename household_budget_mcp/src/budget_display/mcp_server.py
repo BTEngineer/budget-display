@@ -60,6 +60,32 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         return ledger
 
     @server.tool()
+    def prepare_expense(
+        request_id: str,
+        member: str,
+        category: str,
+        amount: str,
+        business_name: str = "",
+        description: str = "",
+        occurred_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Prepare an exact expense for explicit confirmation.
+
+        The returned short-lived token is bound to every supplied field. Use
+        it as confirmation_token in add_expense without changing the payload.
+        This two-step flow is mandatory for expenses over $500.
+        """
+        return ready_ledger().prepare_expense(
+            request_id=request_id,
+            member=member,
+            category=category,
+            amount=amount,
+            business_name=business_name,
+            description=description,
+            occurred_at=occurred_at,
+        )
+
+    @server.tool()
     def add_expense(
         request_id: str,
         member: str,
@@ -68,7 +94,7 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         business_name: str = "",
         description: str = "",
         occurred_at: str | None = None,
-        confirm_large_expense: bool = False,
+        confirmation_token: str | None = None,
     ) -> dict[str, Any]:
         """Record one household expense.
 
@@ -76,10 +102,9 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         the Home Assistant app configuration; a parent with children requires
         Parent/Child notation. Amount is a positive decimal string such as
         "8.00". Store a merchant in business_name rather than embedding it only
-        in description. Expenses over $500 require the caller to acknowledge
-        the amount with confirm_large_expense=true. This flag is an advisory
-        client-policy safeguard; the server cannot prove that a person approved
-        it. occurred_at must be an ISO 8601 timestamp with timezone when supplied.
+        in description. Expenses over $500 require a token from prepare_expense
+        that matches the exact payload. occurred_at must be an ISO 8601
+        timestamp with timezone when supplied.
         """
         clean_request_id = _validate_bounded_text(
             request_id, name="request_id", maximum=MAX_REQUEST_ID_LENGTH
@@ -95,17 +120,114 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
                 f"business_name cannot exceed {MAX_BUSINESS_NAME_LENGTH} characters"
             )
         cents = _amount_cents_for_confirmation(amount)
-        if cents > LARGE_EXPENSE_CENTS and not confirm_large_expense:
-            raise BudgetValidationError(
-                "expense exceeds $500; caller policy must acknowledge the exact amount, member, and category, then retry with confirm_large_expense=true"
+        active_ledger = ready_ledger()
+        if cents > LARGE_EXPENSE_CENTS:
+            if not confirmation_token:
+                raise BudgetValidationError(
+                    "expense exceeds $500; call prepare_expense and retry with its exact confirmation_token"
+                )
+            active_ledger.validate_expense_confirmation(
+                token=confirmation_token,
+                request_id=clean_request_id,
+                member=member,
+                category=category,
+                amount=amount,
+                business_name=clean_business_name,
+                description=clean_description,
+                occurred_at=occurred_at,
             )
-        return ready_ledger().add_expense(
+        return active_ledger.add_expense(
             request_id=clean_request_id,
             member=member,
             category=category,
             amount=amount,
             business_name=clean_business_name,
             description=clean_description,
+            occurred_at=occurred_at,
+        )
+
+    @server.tool()
+    def correct_expense(
+        request_id: str,
+        transaction_id: str,
+        member: str | None = None,
+        category: str | None = None,
+        amount: str | None = None,
+        business_name: str | None = None,
+        description: str | None = None,
+        occurred_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Correct a verified expense without deleting history.
+
+        Only supplied fields change. The server atomically records a linked
+        reversal plus replacement. Refunded or reversed targets fail closed.
+        """
+        return ready_ledger().correct_expense(
+            request_id=request_id,
+            transaction_id=transaction_id,
+            member=member,
+            category=category,
+            amount=amount,
+            business_name=business_name,
+            description=description,
+            occurred_at=occurred_at,
+        )
+
+    @server.tool()
+    def prepare_split_expense(
+        request_id: str,
+        total_amount: str,
+        allocations: list[dict[str, str]],
+        business_name: str = "",
+        description: str = "",
+        occurred_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Prepare an exact split expense for explicit confirmation."""
+        return ready_ledger().prepare_split_expense(
+            request_id=request_id,
+            total_amount=total_amount,
+            allocations=allocations,
+            business_name=business_name,
+            description=description,
+            occurred_at=occurred_at,
+        )
+
+    @server.tool()
+    def add_split_expense(
+        request_id: str,
+        total_amount: str,
+        allocations: list[dict[str, str]],
+        business_name: str = "",
+        description: str = "",
+        occurred_at: str | None = None,
+        confirmation_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically split one purchase across people or categories.
+
+        Each allocation needs member, category, and positive decimal amount.
+        Allocations must add up exactly to total_amount or nothing is recorded.
+        """
+        active_ledger = ready_ledger()
+        if _amount_cents_for_confirmation(total_amount) > LARGE_EXPENSE_CENTS:
+            if not confirmation_token:
+                raise BudgetValidationError(
+                    "split expense exceeds $500; call prepare_split_expense and retry with its exact confirmation_token"
+                )
+            active_ledger.validate_split_confirmation(
+                token=confirmation_token,
+                request_id=request_id,
+                total_amount=total_amount,
+                allocations=allocations,
+                business_name=business_name,
+                description=description,
+                occurred_at=occurred_at,
+            )
+        return active_ledger.add_split_expense(
+            request_id=request_id,
+            total_amount=total_amount,
+            allocations=allocations,
+            business_name=business_name,
+            description=description,
             occurred_at=occurred_at,
         )
 
@@ -118,6 +240,30 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
     def list_budget_categories() -> list[dict[str, Any]]:
         """List valid categories and identify which accept expenses."""
         return ready_ledger().list_budget_categories()
+
+    @server.tool()
+    def suggest_expense_classification(
+        business_name: str = "",
+        description: str = "",
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        """Suggest categories from configured aliases and prior expenses.
+
+        Suggestions are read-only evidence. The caller must still supply an
+        explicit category to a write tool.
+        """
+        return ready_ledger().suggest_expense_classification(
+            business_name=business_name,
+            description=description,
+            limit=limit,
+        )
+
+    @server.tool()
+    def get_budget_outlook(
+        month: str, as_of: str | None = None
+    ) -> dict[str, Any]:
+        """Return server-calculated budget pace, projection, and category risks."""
+        return ready_ledger().get_budget_outlook(month=month, as_of=as_of)
 
     @server.tool()
     def undo_last_expense(request_id: str, member: str) -> dict[str, Any]:

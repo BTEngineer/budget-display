@@ -12,9 +12,15 @@ mcp_servers:
     supports_parallel_tool_calls: false
     tools:
       include:
+        - prepare_expense
         - add_expense
+        - correct_expense
+        - prepare_split_expense
+        - add_split_expense
         - list_spending
         - list_budget_categories
+        - suggest_expense_classification
+        - get_budget_outlook
         - undo_last_expense
         - search_transactions
         - refund_expense
