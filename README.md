@@ -93,6 +93,9 @@ No-op corrections are rejected without adding reversal records.
 to equal the stated total. Classification and outlook tools are read-only; a
 category suggestion never authorizes a ledger write.
 
+See the [Household Budget MCP 0.9.1 reference](docs/household-budget-mcp-0.9.1.md)
+for the complete command, parameter, confirmation, retry, and error contract.
+
 Large-write confirmation applies to the first mutation. Once an exact request
 ID and payload have committed, a retry returns the existing result even if the
 short-lived token is missing or expired; conflicting reuse still fails closed.

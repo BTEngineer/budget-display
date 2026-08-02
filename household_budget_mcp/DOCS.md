@@ -3,6 +3,9 @@
 This app hosts the household SQLite ledger and its narrow MCP interface on Home
 Assistant OS.
 
+For the versioned 13-command tool contract, see the
+[Household Budget MCP 0.9.1 reference](../docs/household-budget-mcp-0.9.1.md).
+
 ## Release status
 
 Version 0.9.1 is implemented on the development branch. It adds exact
