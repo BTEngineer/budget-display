@@ -12,10 +12,25 @@ esphome:
         - delay: 200ms
         - component.update: battery_voltage
         - component.update: battery_level
+        - lambda: |-
+            const uint64_t wake_pins = esp_sleep_get_ext1_wakeup_status();
+            const bool woke_from_green_button =
+                (wake_pins & (1ULL << 4)) != 0;
+            if (woke_from_green_button && !id(green_wake_processed)) {
+              id(show_budget_page) = !id(show_budget_page);
+              id(green_wake_processed) = true;
+            }
     - priority: -100
       then:
         - delay: 20s
+        - lambda: |-
+            if (id(show_budget_page)) {
+              id(epaper_display).show_page(id(budget_page));
+            } else {
+              id(epaper_display).show_page(id(home_page));
+            }
         - component.update: epaper_display
+        - lambda: id(boot_display_ready) = true;
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -56,6 +71,22 @@ output:
   - platform: gpio
     pin: GPIO21
     id: battery_measure_enable
+
+globals:
+  # The selected page survives deep sleep so scheduled wakes refresh the page
+  # that was already visible. The green wake button toggles it once per press.
+  - id: show_budget_page
+    type: bool
+    restore_value: true
+    initial_value: "false"
+  - id: green_wake_processed
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: boot_display_ready
+    type: bool
+    restore_value: false
+    initial_value: "false"
 
 sensor:
   - platform: adc
@@ -144,7 +175,7 @@ binary_sensor:
 
   - platform: gpio
     id: refresh_button
-    name: Refresh Screen Button
+    name: Green Page Toggle Button
     pin:
       number: GPIO4
       mode: INPUT_PULLUP
@@ -152,9 +183,33 @@ binary_sensor:
       allow_other_uses: true
     on_press:
       then:
-        - component.update: battery_voltage
-        - component.update: battery_level
-        - component.update: epaper_display
+        - lambda: |-
+            const uint64_t wake_pins = esp_sleep_get_ext1_wakeup_status();
+            const bool this_boot_woke_from_green_button =
+                (wake_pins & (1ULL << 4)) != 0;
+            const bool duplicate_boot_press =
+                !id(boot_display_ready) &&
+                this_boot_woke_from_green_button &&
+                id(green_wake_processed);
+            if (!duplicate_boot_press) {
+              id(show_budget_page) = !id(show_budget_page);
+              if (!id(boot_display_ready) &&
+                  this_boot_woke_from_green_button) {
+                id(green_wake_processed) = true;
+              }
+            }
+            if (id(show_budget_page)) {
+              id(epaper_display).show_page(id(budget_page));
+            } else {
+              id(epaper_display).show_page(id(home_page));
+            }
+        - if:
+            condition:
+              lambda: return id(boot_display_ready);
+            then:
+              - component.update: battery_voltage
+              - component.update: battery_level
+              - component.update: epaper_display
 
   - platform: gpio
     id: previous_button
@@ -200,6 +255,13 @@ font:
       - "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
       - "abcdefghijklmnopqrstuvwxyz"
       - "$%.,!?()-/:<>"
+  - file: "gfonts://Inter@700"
+    id: home_time_font
+    size: 76
+    glyphsets: []
+    glyphs:
+      - " 0123456789"
+      - ":AMP"
 
 display:
   - platform: waveshare_epaper
@@ -215,6 +277,37 @@ display:
       inverted: true
     update_interval: never
     pages:
+      - id: home_page
+        lambda: |-
+          auto now = id(ha_time).now();
+          it.print(24, 18, id(heading_font), "HOUSEHOLD HOME");
+          if (isnan(id(battery_level).state)) {
+            it.print(776, 22, id(body_font), TextAlign::TOP_RIGHT,
+                     "Battery --");
+          } else {
+            it.printf(776, 22, id(body_font), TextAlign::TOP_RIGHT,
+                      "Battery %.0f%%", id(battery_level).state);
+          }
+          it.line(24, 70, 776, 70);
+
+          if (now.is_valid()) {
+            it.strftime(400, 122, id(home_time_font), TextAlign::TOP_CENTER,
+                        "%I:%M %p", now);
+            it.strftime(400, 220, id(heading_font), TextAlign::TOP_CENTER,
+                        "%A", now);
+            it.strftime(400, 270, id(body_font), TextAlign::TOP_CENTER,
+                        "%B %d, %Y", now);
+          } else {
+            it.print(400, 175, id(heading_font), TextAlign::TOP_CENTER,
+                     "CONNECTING...");
+            it.print(400, 235, id(body_font), TextAlign::TOP_CENTER,
+                     "Waiting for Home Assistant time.");
+          }
+
+          it.line(24, 420, 776, 420);
+          it.print(776, 447, id(body_font), TextAlign::TOP_RIGHT,
+                   "Green: Budget  |  Side buttons: Refresh");
+
       - id: budget_page
         lambda: |-
           auto now = id(ha_time).now();
@@ -306,7 +399,7 @@ display:
           }
 
           it.print(776, 447, id(body_font), TextAlign::TOP_RIGHT,
-                   "Press any button to refresh");
+                   "Green: Home  |  Side buttons: Refresh");
 
 deep_sleep:
   id: display_sleep

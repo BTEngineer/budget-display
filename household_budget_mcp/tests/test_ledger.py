@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -207,6 +208,30 @@ class BudgetLedgerTests(unittest.TestCase):
                 request_id="member-one-undo", member="Member 2"
             )
 
+    def test_dashboard_undo_targets_the_selected_entry(self) -> None:
+        older = self.ledger.add_expense(
+            request_id="older",
+            member="Member 1",
+            category="Everyday",
+            amount="10.00",
+            occurred_at="2026-08-01T12:00:00-04:00",
+        )
+        newer = self.ledger.add_expense(
+            request_id="newer",
+            member="Member 1",
+            category="Everyday",
+            amount="20.00",
+            occurred_at="2026-08-02T12:00:00-04:00",
+        )
+        reversal = self.ledger.undo_last_expense(
+            request_id="undo-older", member="Member 1", entry_id=older["id"]
+        )
+        self.assertEqual(reversal["reverses_entry_id"], older["id"])
+        self.assertEqual(
+            [entry["id"] for entry in self.ledger.list_recent_expenses(limit=10)],
+            [newer["id"]],
+        )
+
     def test_initial_monthly_limits_total_1800(self) -> None:
         summary = self.ledger.list_spending(month="2026-08")
         self.assertEqual(summary["budget_cents"], 180000)
@@ -318,6 +343,367 @@ class BudgetLedgerTests(unittest.TestCase):
             row for row in rows if row["name"] == "Food" and row["parent"] is None
         )
         self.assertEqual(root_food["spent_cents"], 100)
+
+    def test_receipt_draft_requires_confirmation_and_is_idempotent(self) -> None:
+        draft = self.ledger.register_receipt(
+            digest="a" * 64,
+            relative_path="receipts/a.jpg",
+            content_type="image/jpeg",
+            byte_size=10,
+            original_filename="receipt.jpg",
+        )
+        duplicate = self.ledger.register_receipt(
+            digest="a" * 64,
+            relative_path="receipts/a.jpg",
+            content_type="image/jpeg",
+            byte_size=10,
+            original_filename="receipt-copy.jpg",
+        )
+        self.assertFalse(draft["duplicate"])
+        self.assertTrue(duplicate["duplicate"])
+        analyzed = self.ledger.update_receipt_draft(
+            draft_id=draft["id"],
+            ai_entity_id="ai_task.openai",
+            fields={"merchant": "Market", "total": "12.34", "suggested_category": "Everyday"},
+        )
+        self.assertEqual(analyzed["status"], "analyzed")
+        confirmed = self.ledger.confirm_receipt_draft(
+            draft_id=draft["id"],
+            request_id="receipt-confirm-1",
+            member="Member 1",
+            category="Everyday",
+            amount="12.34",
+            description="Market",
+        )
+        retried = self.ledger.confirm_receipt_draft(
+            draft_id=draft["id"],
+            request_id="receipt-confirm-1",
+            member="Member 1",
+            category="Everyday",
+            amount="12.34",
+            description="Market",
+        )
+        self.assertEqual(confirmed["draft"]["status"], "confirmed")
+        self.assertEqual(confirmed["entry"]["transaction"]["business_name"], "Market")
+        self.assertTrue(retried["entry"]["duplicate"])
+        self.assertEqual(len(self.ledger.list_recent_expenses(limit=10)), 1)
+
+    def test_confirmed_receipt_rejects_a_different_request_id(self) -> None:
+        draft = self.ledger.register_receipt(
+            digest="b" * 64,
+            relative_path="receipts/b.jpg",
+            content_type="image/jpeg",
+            byte_size=10,
+            original_filename="receipt.jpg",
+        )
+        self.ledger.confirm_receipt_draft(
+            draft_id=draft["id"], request_id="first", member="Member 1",
+            category="Everyday", amount="1.00"
+        )
+        with self.assertRaises(DuplicateRequestError):
+            self.ledger.confirm_receipt_draft(
+                draft_id=draft["id"], request_id="second", member="Member 1",
+                category="Everyday", amount="1.00"
+            )
+
+    def test_failed_receipt_confirmation_releases_request_claim(self) -> None:
+        draft = self.ledger.register_receipt(
+            digest="c" * 64,
+            relative_path="receipts/c.jpg",
+            content_type="image/jpeg",
+            byte_size=10,
+            original_filename="receipt.jpg",
+        )
+        with self.assertRaises(BudgetValidationError):
+            self.ledger.confirm_receipt_draft(
+                draft_id=draft["id"], request_id="invalid", member="Member 1",
+                category="Everyday", amount="not-money"
+            )
+        confirmed = self.ledger.confirm_receipt_draft(
+            draft_id=draft["id"], request_id="corrected", member="Member 1",
+            category="Everyday", amount="1.00"
+        )
+        self.assertEqual(confirmed["draft"]["confirmation_request_id"], "corrected")
+
+    def test_canonical_expense_includes_business_and_refundable_balance(self) -> None:
+        entry = self.ledger.add_expense(
+            request_id="canonical-expense",
+            member="Member 1",
+            category="Meals/Food",
+            amount="24.30",
+            business_name="North Market",
+            description="Groceries",
+            occurred_at="2026-08-01T12:00:00-04:00",
+        )
+        canonical = entry["transaction"]
+        self.assertTrue(canonical["transaction_id"].startswith("txn_"))
+        self.assertEqual(canonical["category"], "Meals/Food")
+        self.assertEqual(canonical["business_name"], "North Market")
+        self.assertEqual(canonical["amount"], "24.30")
+        self.assertEqual(canonical["refund_status"], "none")
+        self.assertEqual(canonical["remaining_refundable_amount"], "24.30")
+
+    def test_partial_and_full_linked_refunds_are_audited_and_idempotent(self) -> None:
+        original = self.ledger.add_expense(
+            request_id="refund-original",
+            member="Member 1",
+            category="Everyday",
+            amount="20.00",
+            business_name="Hardware Shop",
+            occurred_at="2026-07-31T18:00:00-04:00",
+        )
+        transaction_id = original["transaction"]["transaction_id"]
+        partial = self.ledger.refund_expense(
+            request_id="refund-partial",
+            expense_id=transaction_id,
+            amount="7.50",
+            occurred_at="2026-08-01T10:00:00-04:00",
+        )
+        duplicate = self.ledger.refund_expense(
+            request_id="refund-partial",
+            expense_id=transaction_id,
+            amount="7.50",
+            occurred_at="2026-08-01T10:00:00-04:00",
+        )
+        self.assertEqual(partial["amount_cents"], -750)
+        self.assertTrue(duplicate["duplicate"])
+        after_partial = self.ledger.search_transactions(
+            transaction_id=transaction_id, status="all"
+        )["transactions"][0]
+        self.assertEqual(after_partial["refund_status"], "partial")
+        self.assertEqual(after_partial["remaining_refundable_amount"], "12.50")
+
+        full = self.ledger.refund_expense(
+            request_id="refund-full",
+            expense_id=transaction_id,
+            amount="12.50",
+            occurred_at="2026-08-02T10:00:00-04:00",
+        )
+        self.assertEqual(full["transaction"]["refund_link_status"], "linked")
+        after_full = self.ledger.search_transactions(
+            transaction_id=transaction_id, status="all"
+        )["transactions"][0]
+        self.assertEqual(after_full["refund_status"], "full")
+        self.assertEqual(after_full["refunded_amount"], "20.00")
+        self.assertEqual(self.ledger.list_spending(month="2026-07")["spent_cents"], 2000)
+        self.assertEqual(self.ledger.list_spending(month="2026-08")["spent_cents"], -2000)
+
+        with self.assertRaisesRegex(BudgetValidationError, "remaining refundable"):
+            self.ledger.refund_expense(
+                request_id="refund-too-much",
+                expense_id=transaction_id,
+                amount="0.01",
+            )
+
+    def test_unlinked_refund_and_refunded_expense_cannot_be_undone(self) -> None:
+        original = self.ledger.add_expense(
+            request_id="expense-before-refund",
+            member="Member 2",
+            category="Occasional",
+            amount="15.00",
+        )
+        self.ledger.refund_expense(
+            request_id="linked-refund",
+            expense_id=original["transaction"]["transaction_id"],
+            amount="5.00",
+        )
+        with self.assertRaisesRegex(BudgetValidationError, "no expense is available"):
+            self.ledger.undo_last_expense(
+                request_id="undo-refunded",
+                member="Member 2",
+                entry_id=original["id"],
+            )
+
+        unlinked = self.ledger.refund_expense(
+            request_id="unlinked-refund",
+            amount="3.25",
+            member="Member 2",
+            category="Meals/Drinks",
+            business_name="Cafe",
+        )
+        self.assertEqual(unlinked["transaction"]["refund_link_status"], "unlinked")
+        self.assertIsNone(unlinked["transaction"]["refund_of_transaction_id"])
+        duplicate = self.ledger.refund_expense(
+            request_id="unlinked-refund",
+            amount="3.25",
+            member="Member 2",
+            category="Meals/Drinks",
+            business_name="Cafe",
+        )
+        self.assertTrue(duplicate["duplicate"])
+        with self.assertRaises(DuplicateRequestError):
+            self.ledger.refund_expense(
+                request_id="unlinked-refund",
+                amount="3.25",
+                member="Member 2",
+                category="Meals/Drinks",
+                business_name="Different Cafe",
+            )
+
+    def test_search_filters_category_business_and_literal_wildcards(self) -> None:
+        self.ledger.add_expense(
+            request_id="search-one",
+            member="Member 1",
+            category="Meals/Food",
+            amount="10.00",
+            business_name="A_100% Market",
+            description="Weekly food",
+            occurred_at="2026-08-01T10:00:00-04:00",
+        )
+        self.ledger.add_expense(
+            request_id="search-two",
+            member="Member 2",
+            category="Meals/Drinks",
+            amount="5.00",
+            business_name="Coffee House",
+            description="Morning drink",
+            occurred_at="2026-08-02T10:00:00-04:00",
+        )
+        parent = self.ledger.search_transactions(category="Meals")
+        self.assertEqual(parent["count"], 2)
+        literal = self.ledger.search_transactions(business_name="_100%")
+        self.assertEqual(literal["count"], 1)
+        combined = self.ledger.search_transactions(
+            member="Member 2", category="Meals/Drinks", description_query="drink"
+        )
+        self.assertEqual(combined["count"], 1)
+        self.assertEqual(combined["transactions"][0]["business_name"], "Coffee House")
+
+    def test_search_cursor_is_stable_bound_to_filters_and_tamper_evident(self) -> None:
+        for index in range(3):
+            self.ledger.add_expense(
+                request_id=f"page-{index}",
+                member="Member 1",
+                category="Everyday",
+                amount="1.00",
+                occurred_at="2026-08-01T12:00:00-04:00",
+            )
+        first = self.ledger.search_transactions(
+            category="Everyday", sort_order="ascending", limit=2
+        )
+        self.assertTrue(first["has_more"])
+        second = self.ledger.search_transactions(
+            category="Everyday",
+            sort_order="ascending",
+            limit=2,
+            cursor=first["next_cursor"],
+        )
+        ids = [row["transaction_id"] for row in first["transactions"] + second["transactions"]]
+        self.assertEqual(len(ids), 3)
+        self.assertEqual(len(set(ids)), 3)
+        with self.assertRaisesRegex(BudgetValidationError, "does not match"):
+            self.ledger.search_transactions(
+                member="Member 2", limit=2, cursor=first["next_cursor"]
+            )
+        tampered = first["next_cursor"][:-1] + ("A" if first["next_cursor"][-1] != "A" else "B")
+        with self.assertRaisesRegex(BudgetValidationError, "cursor is invalid"):
+            self.ledger.search_transactions(
+                category="Everyday",
+                sort_order="ascending",
+                limit=2,
+                cursor=tampered,
+            )
+
+    def test_search_time_amount_identifier_and_status_filters(self) -> None:
+        first = self.ledger.add_expense(
+            request_id="filter-first",
+            member="Member 1",
+            category="Everyday",
+            amount="10.00",
+            occurred_at="2026-08-01T00:00:00-04:00",
+        )
+        second = self.ledger.add_expense(
+            request_id="filter-second",
+            member="Member 1",
+            category="Everyday",
+            amount="20.00",
+            occurred_at="2026-08-02T00:00:00-04:00",
+        )
+        self.ledger.undo_last_expense(
+            request_id="filter-undo", member="Member 1", entry_id=second["id"]
+        )
+        bounded = self.ledger.search_transactions(
+            start_at="2026-08-01T00:00:00-04:00",
+            end_at="2026-08-02T00:00:00-04:00",
+            operation_type="expense",
+            status="all",
+        )
+        self.assertEqual(
+            [row["transaction_id"] for row in bounded["transactions"]],
+            [first["transaction"]["transaction_id"]],
+        )
+        reversed_expense = self.ledger.search_transactions(
+            minimum_amount="15.00",
+            maximum_amount="20.00",
+            operation_type="expense",
+            status="reversed",
+        )
+        self.assertEqual(reversed_expense["count"], 1)
+        exact = self.ledger.search_transactions(
+            request_id="filter-second", status="all"
+        )
+        self.assertEqual(exact["transactions"][0]["status"], "reversed")
+
+    def test_initialize_migrates_legacy_entries_to_stable_canonical_records(self) -> None:
+        database = Path(self.temporary_directory.name) / "legacy.db"
+        connection = sqlite3.connect(database)
+        try:
+            connection.executescript(
+                """
+                CREATE TABLE members (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    active INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE TABLE categories (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL COLLATE NOCASE,
+                    parent_id INTEGER REFERENCES categories(id),
+                    active INTEGER NOT NULL DEFAULT 1,
+                    UNIQUE (parent_id, name)
+                );
+                CREATE TABLE ledger_entries (
+                    id INTEGER PRIMARY KEY,
+                    request_id TEXT NOT NULL UNIQUE,
+                    member_id INTEGER NOT NULL REFERENCES members(id),
+                    category_id INTEGER NOT NULL REFERENCES categories(id),
+                    amount_cents INTEGER NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    occurred_at TEXT NOT NULL,
+                    local_month TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    reverses_entry_id INTEGER UNIQUE REFERENCES ledger_entries(id)
+                );
+                INSERT INTO members(id, name) VALUES (1, 'Member 1');
+                INSERT INTO categories(id, name, parent_id) VALUES (1, 'Everyday', NULL);
+                INSERT INTO ledger_entries(
+                    id, request_id, member_id, category_id, amount_cents,
+                    description, occurred_at, local_month, created_at,
+                    reverses_entry_id
+                ) VALUES
+                    (1, 'legacy-expense', 1, 1, 1000, 'Old purchase',
+                     '2026-08-01T12:00:00+00:00', '2026-08',
+                     '2026-08-01T12:00:01+00:00', NULL),
+                    (2, 'legacy-undo', 1, 1, -1000, 'Undo: Old purchase',
+                     '2026-08-02T12:00:00+00:00', '2026-08',
+                     '2026-08-02T12:00:01+00:00', 1);
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        ledger = BudgetLedger(database)
+        ledger.initialize()
+        first = ledger.search_transactions(status="all", sort_order="ascending")
+        self.assertEqual(
+            [row["operation_type"] for row in first["transactions"]],
+            ["expense", "reversal"],
+        )
+        ids = [row["transaction_id"] for row in first["transactions"]]
+        self.assertTrue(all(value.startswith("txn_") for value in ids))
+        ledger.initialize()
+        second = ledger.search_transactions(status="all", sort_order="ascending")
+        self.assertEqual(ids, [row["transaction_id"] for row in second["transactions"]])
 
 
 if __name__ == "__main__":

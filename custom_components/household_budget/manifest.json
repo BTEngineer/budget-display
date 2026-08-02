@@ -1,0 +1,11 @@
+{
+  "domain": "household_budget",
+  "name": "Household Budget",
+  "codeowners": ["@BTEngineer"],
+  "config_flow": true,
+  "documentation": "https://github.com/BTEngineer/budget-display",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "single_config_entry": true,
+  "version": "0.8.0"
+}

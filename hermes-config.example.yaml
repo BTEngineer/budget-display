@@ -16,5 +16,7 @@ mcp_servers:
         - list_spending
         - list_budget_categories
         - undo_last_expense
+        - search_transactions
+        - refund_expense
       resources: false
       prompts: false

@@ -55,6 +55,8 @@ class BudgetMQTTPublisherTests(unittest.TestCase):
         self.assertEqual(messages["household_budget/status"], "online")
         self.assertEqual(messages["household_budget/state/spent_month"], "0.00")
         self.assertEqual(messages["household_budget/state/remaining_month"], "1000.00")
+        self.assertEqual(messages["household_budget/state/budget_month"], "1000.00")
+        self.assertEqual(messages["household_budget/state/percent_used_month"], "0.0")
         self.assertEqual(messages["household_budget/state/person_1_month"], "0.00")
         self.assertEqual(messages["household_budget/state/person_2_month"], "0.00")
         self.assertEqual(
@@ -76,6 +78,12 @@ class BudgetMQTTPublisherTests(unittest.TestCase):
         )
         self.assertEqual(discovery["name"], "Alpha this month")
         self.assertNotIn("secret", json.dumps(discovery))
+        category_key = self.publisher._category_key("Everyday")
+        self.assertEqual(
+            messages[f"household_budget/state/category_{category_key}_budget_month"],
+            "1000.00",
+        )
+        self.assertIn("household_budget/state/last_update", messages)
 
     def test_category_rows_include_member_and_parent_totals(self) -> None:
         ledger = BudgetLedger(

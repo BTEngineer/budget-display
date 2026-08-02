@@ -77,6 +77,91 @@ class BudgetMCPHTTPTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 421)
 
+    def test_json_api_requires_auth_and_rejects_wrong_host(self) -> None:
+        self.assertEqual(self.client.get("/api/v1/config").status_code, 401)
+        response = self.client.get(
+            "http://untrusted.example/api/v1/config",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+        self.assertEqual(response.status_code, 421)
+
+    def test_manual_expense_round_trip_through_json_api(self) -> None:
+        headers = {"Authorization": f"Bearer {TOKEN}"}
+        config = self.client.get("/api/v1/config", headers=headers)
+        self.assertEqual(config.status_code, 200)
+        added = self.client.post(
+            "/api/v1/expenses",
+            headers=headers,
+            json={
+                "request_id": "ha-manual-1",
+                "member": "Member 1",
+                "category": "Everyday",
+                "amount": "4.25",
+                "business_name": "Local Shop",
+                "description": "Phone entry",
+                "occurred_on": "2026-08-01",
+            },
+        )
+        self.assertEqual(added.status_code, 201)
+        recent = self.client.get("/api/v1/recent", headers=headers).json()["expenses"]
+        self.assertEqual(recent[0]["amount_cents"], 425)
+        self.assertEqual(recent[0]["transaction"]["business_name"], "Local Shop")
+        self.assertTrue(recent[0]["occurred_at"].startswith("2026-08-01T16:00:00"))
+
+    def test_receipt_upload_analysis_and_confirmation(self) -> None:
+        headers = {
+            "Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "image/png",
+            "X-Receipt-Filename": "phone.png",
+        }
+        upload = self.client.post(
+            "/api/v1/receipts", headers=headers, content=b"\x89PNG\r\n\x1a\nreceipt"
+        )
+        self.assertEqual(upload.status_code, 201)
+        draft_id = upload.json()["draft"]["id"]
+        auth = {"Authorization": f"Bearer {TOKEN}"}
+        analysis = self.client.post(
+            f"/api/v1/receipts/{draft_id}/analysis",
+            headers=auth,
+            json={"ai_entity_id": "ai_task.openai", "fields": {"total": "9.99"}},
+        )
+        self.assertEqual(analysis.json()["draft"]["status"], "analyzed")
+        confirmed = self.client.post(
+            f"/api/v1/receipts/{draft_id}/confirm",
+            headers=auth,
+            json={
+                "request_id": "receipt-api-1",
+                "member": "Member 1",
+                "category": "Everyday",
+                "amount": "9.99",
+            },
+        )
+        self.assertEqual(confirmed.status_code, 201)
+        self.assertEqual(confirmed.json()["entry"]["amount_cents"], 999)
+        self.assertTrue(confirmed.json()["receipt_deleted"])
+        receipt_directory = Path(self.temporary_directory.name) / "receipts"
+        self.assertEqual(list(receipt_directory.glob("*")), [])
+
+        duplicate = self.client.post(
+            "/api/v1/receipts", headers=headers, content=b"\x89PNG\r\n\x1a\nreceipt"
+        )
+        self.assertEqual(duplicate.status_code, 200)
+        self.assertEqual(duplicate.json()["draft"]["status"], "confirmed")
+        self.assertEqual(list(receipt_directory.glob("*")), [])
+
+    def test_large_expense_requires_explicit_confirmation(self) -> None:
+        response = self.client.post(
+            "/api/v1/expenses",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            json={
+                "request_id": "large",
+                "member": "Member 1",
+                "category": "Everyday",
+                "amount": "501.00",
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+
     def test_options_file_is_validated_and_environment_can_override_paths(self) -> None:
         options = Path(self.temporary_directory.name) / "options.json"
         options.write_text(

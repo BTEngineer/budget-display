@@ -1,0 +1,117 @@
+# IMPLEMENTED LOCALLY - do not import into the live Home Assistant instance
+# until the custom integration and app version 0.8.0 are installed.
+#
+# This dashboard references the locally implemented Household Budget custom
+# card and numeric MQTT entities. Live entity IDs must be verified after the
+# app publishes MQTT discovery.
+
+title: Household Budget
+views:
+  - title: Budget
+    path: budget
+    icon: mdi:wallet-outline
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: This month
+            icon: mdi:calendar-month
+
+          - type: tile
+            entity: sensor.household_budget_spent_month
+            name: Spent
+            icon: mdi:cash-minus
+            vertical: true
+            grid_options:
+              columns: 6
+              rows: 2
+
+          - type: tile
+            entity: sensor.household_budget_remaining_month
+            name: Remaining
+            icon: mdi:piggy-bank-outline
+            vertical: true
+            grid_options:
+              columns: 6
+              rows: 2
+
+          - type: gauge
+            entity: sensor.household_budget_percent_used_month
+            name: Budget used
+            unit: "%"
+            needle: true
+            severity:
+              green: 0
+              yellow: 75
+              red: 90
+            grid_options:
+              columns: 12
+              rows: 3
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Add an expense
+            icon: mdi:receipt-text-plus-outline
+
+          # Proposed custom card. On a phone, receipt capture is the primary
+          # action and requests the rear camera when the browser supports it.
+          - type: custom:household-budget-card
+            mode: entry
+            default_date: today
+            receipt_capture: environment
+            require_review: true
+            grid_options:
+              columns: 12
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Spending by person
+            icon: mdi:account-group-outline
+
+          - type: tile
+            entity: sensor.household_budget_person_1_month
+            name: Member 1
+            icon: mdi:account-outline
+            vertical: false
+            grid_options:
+              columns: 6
+
+          - type: tile
+            entity: sensor.household_budget_person_2_month
+            name: Member 2
+            icon: mdi:account-outline
+            vertical: false
+            grid_options:
+              columns: 6
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Categories
+            icon: mdi:chart-bar
+
+          - type: custom:household-budget-card
+            mode: categories
+            show_budget: true
+            show_remaining: true
+            show_person_split: true
+            grid_options:
+              columns: 12
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Recent expenses
+            icon: mdi:history
+
+          - type: custom:household-budget-card
+            mode: recent
+            limit: 10
+            allow_undo: true
+            require_undo_confirmation: true
+            grid_options:
+              columns: 12
