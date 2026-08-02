@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -872,6 +873,148 @@ class BudgetLedgerTests(unittest.TestCase):
         self.assertEqual(outlook["previous_same_point_cents"], 30000)
         self.assertEqual(outlook["pace_change_cents"], 30000)
         self.assertEqual(outlook["categories_at_risk"][0]["category"], "Everyday")
+
+    def test_prepared_expenses_bind_a_concrete_timestamp_and_month(self) -> None:
+        with patch(
+            "budget_display.ledger._utc_now",
+            return_value="2026-08-31T23:59:59+00:00",
+        ):
+            prepared = self.ledger.prepare_expense(
+                request_id="bound-single",
+                member="Member 1",
+                category="Everyday",
+                amount="600.00",
+            )
+            prepared_split = self.ledger.prepare_split_expense(
+                request_id="bound-split",
+                total_amount="600.00",
+                allocations=[
+                    {"member": "Member 1", "category": "Everyday", "amount": "300.00"},
+                    {"member": "Member 2", "category": "Occasional", "amount": "300.00"},
+                ],
+            )
+        single_time = prepared["expense"]["occurred_at"]
+        split_time = prepared_split["split_expense"]["occurred_at"]
+        self.assertEqual(single_time, "2026-08-31T23:59:59+00:00")
+        self.assertEqual(split_time, "2026-08-31T23:59:59+00:00")
+        with self.assertRaisesRegex(BudgetValidationError, "occurred_at"):
+            self.ledger.validate_expense_confirmation(
+                token=prepared["confirmation_token"],
+                request_id="bound-single",
+                member="Member 1",
+                category="Everyday",
+                amount="600.00",
+            )
+        with self.assertRaisesRegex(BudgetValidationError, "occurred_at"):
+            self.ledger.validate_split_confirmation(
+                token=prepared_split["confirmation_token"],
+                request_id="bound-split",
+                total_amount="600.00",
+                allocations=[
+                    {"member": "Member 1", "category": "Everyday", "amount": "300.00"},
+                    {"member": "Member 2", "category": "Occasional", "amount": "300.00"},
+                ],
+            )
+
+        with patch(
+            "budget_display.ledger._utc_now",
+            return_value="2026-09-01T00:00:01+00:00",
+        ):
+            self.ledger.validate_expense_confirmation(
+                token=prepared["confirmation_token"],
+                request_id="bound-single",
+                member="Member 1",
+                category="Everyday",
+                amount="600.00",
+                occurred_at=single_time,
+            )
+            self.ledger.add_expense(
+                request_id="bound-single",
+                member="Member 1",
+                category="Everyday",
+                amount="600.00",
+                occurred_at=single_time,
+            )
+            self.ledger.validate_split_confirmation(
+                token=prepared_split["confirmation_token"],
+                request_id="bound-split",
+                total_amount="600.00",
+                allocations=[
+                    {"member": "Member 1", "category": "Everyday", "amount": "300.00"},
+                    {"member": "Member 2", "category": "Occasional", "amount": "300.00"},
+                ],
+                occurred_at=split_time,
+            )
+            self.ledger.add_split_expense(
+                request_id="bound-split",
+                total_amount="600.00",
+                allocations=[
+                    {"member": "Member 1", "category": "Everyday", "amount": "300.00"},
+                    {"member": "Member 2", "category": "Occasional", "amount": "300.00"},
+                ],
+                occurred_at=split_time,
+            )
+        self.assertEqual(self.ledger.list_spending(month="2026-08")["spent_cents"], 120000)
+        self.assertEqual(self.ledger.list_spending(month="2026-09")["spent_cents"], 0)
+
+    def test_outlook_cutoff_respects_correction_recording_time(self) -> None:
+        with patch(
+            "budget_display.ledger._utc_now",
+            return_value="2026-08-01T13:00:01+00:00",
+        ):
+            original = self.ledger.add_expense(
+                request_id="outlook-correction-original",
+                member="Member 1",
+                category="Everyday",
+                amount="10.00",
+                occurred_at="2026-08-01T09:00:00-04:00",
+            )
+        with patch(
+            "budget_display.ledger._utc_now",
+            return_value="2026-08-10T16:00:00+00:00",
+        ):
+            self.ledger.correct_expense(
+                request_id="outlook-correction",
+                transaction_id=original["transaction"]["transaction_id"],
+                amount="20.00",
+            )
+        before = self.ledger.get_budget_outlook(
+            month="2026-08", as_of="2026-08-05T12:00:00-04:00"
+        )
+        after = self.ledger.get_budget_outlook(
+            month="2026-08", as_of="2026-08-11T12:00:00-04:00"
+        )
+        self.assertEqual(before["spent_cents"], 1000)
+        self.assertEqual(after["spent_cents"], 2000)
+
+    def test_split_allocations_cannot_be_corrected_individually(self) -> None:
+        split = self.ledger.add_split_expense(
+            request_id="protected-split",
+            total_amount="30.00",
+            allocations=[
+                {"member": "Member 1", "category": "Everyday", "amount": "10.00"},
+                {"member": "Member 2", "category": "Occasional", "amount": "20.00"},
+            ],
+            occurred_at="2026-08-01T09:00:00-04:00",
+        )
+        target = split["allocations"][0]["transaction_id"]
+        with self.assertRaisesRegex(BudgetValidationError, "split allocations"):
+            self.ledger.prepare_correction(
+                request_id="prepare-split-correction",
+                transaction_id=target,
+                amount="15.00",
+            )
+        with self.assertRaisesRegex(BudgetValidationError, "split allocations"):
+            self.ledger.correct_expense(
+                request_id="split-correction",
+                transaction_id=target,
+                amount="15.00",
+            )
+        searched = self.ledger.search_transactions(
+            request_id="protected-split", status="all"
+        )["transactions"]
+        self.assertEqual(sum(int(Decimal(row["amount"]) * 100) for row in searched), 3000)
+        self.assertTrue(all(row["status"] == "active" for row in searched))
 
 
 if __name__ == "__main__":

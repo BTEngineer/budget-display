@@ -13,7 +13,7 @@ after installation and is not stored in this repository.
   whichever page is already visible.
 - The ledger stores money as integer cents, rejects duplicate request IDs with
   conflicting data, and uses audit-preserving reversals for undo.
-- The development release exposes twelve authenticated Streamable HTTP MCP
+- The development release exposes thirteen authenticated Streamable HTTP MCP
   tools, including safe correction, atomic splits, classification suggestions,
   and server-calculated budget outlooks.
 - Members, categories, subcategories, classification aliases, monthly limits,
@@ -59,6 +59,7 @@ allowed HTTP Host value. It exposes only:
 
 - `prepare_expense`
 - `add_expense`
+- `prepare_correction`
 - `correct_expense`
 - `prepare_split_expense`
 - `add_split_expense`
@@ -78,11 +79,16 @@ be found. Expenses over $500 require `prepare_expense` followed by
 to the exact request ID, amount, member, category, merchant, description, and
 timestamp; changing any value invalidates it.
 Split totals over $500 use the equivalent `prepare_split_expense` flow.
+When a timestamp is omitted during preparation, the server returns a concrete
+timestamp that must be passed unchanged to the committing tool.
 
 `correct_expense` atomically records a linked reversal and replacement, never
-an in-place edit. `add_split_expense` records all allocations or none and
-requires their amounts to equal the stated total. Classification and outlook
-tools are read-only; a category suggestion never authorizes a ledger write.
+an in-place edit. Corrections whose resolved replacement exceeds $500 require
+an exact token from `prepare_correction`. Individual split allocations cannot
+be corrected because doing so would break split reconciliation.
+`add_split_expense` records all allocations or none and requires their amounts
+to equal the stated total. Classification and outlook tools are read-only; a
+category suggestion never authorizes a ledger write.
 
 The app also consumes Home Assistant's internal `mqtt` service and publishes
 retained discovery/state messages for total spent, total remaining, and each
@@ -104,7 +110,7 @@ are never stored in this repository or the app options.
 
 Merge `hermes-config.example.yaml` into the MCP client's configuration, using
 the same token via the `BUDGET_MCP_TOKEN` environment variable. The example
-keeps an explicit twelve-tool allowlist and disables resources, prompts, and
+keeps an explicit thirteen-tool allowlist and disables resources, prompts, and
 parallel calls.
 
 ## Local development

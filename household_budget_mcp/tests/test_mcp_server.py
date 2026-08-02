@@ -28,7 +28,7 @@ class BudgetMCPServerTests(unittest.TestCase):
 
         return asyncio.run(invoke())
 
-    def test_exposes_only_the_twelve_approved_tools(self) -> None:
+    def test_exposes_only_the_thirteen_approved_tools(self) -> None:
         async def list_tools() -> dict[str, dict[str, object]]:
             async with Client(self.server) as client:
                 result = await client.list_tools()
@@ -40,6 +40,7 @@ class BudgetMCPServerTests(unittest.TestCase):
             {
                 "add_expense",
                 "prepare_expense",
+                "prepare_correction",
                 "correct_expense",
                 "prepare_split_expense",
                 "add_split_expense",
@@ -171,15 +172,103 @@ class BudgetMCPServerTests(unittest.TestCase):
         self.assertTrue(rejected.is_error)
         prepared = self.call("prepare_split_expense", arguments)
         self.assertFalse(prepared.is_error)
-        accepted = self.call(
+        occurred_at = prepared.structured_content["split_expense"]["occurred_at"]
+        missing_bound_time = self.call(
             "add_split_expense",
             {
                 **arguments,
                 "confirmation_token": prepared.structured_content["confirmation_token"],
             },
         )
+        self.assertTrue(missing_bound_time.is_error)
+        self.assertIn("occurred_at", missing_bound_time.content[0].text)
+        accepted = self.call(
+            "add_split_expense",
+            {
+                **arguments,
+                "occurred_at": occurred_at,
+                "confirmation_token": prepared.structured_content["confirmation_token"],
+            },
+        )
         self.assertFalse(accepted.is_error)
         self.assertEqual(accepted.structured_content["total_amount"], "600.00")
+
+    def test_large_correction_requires_exact_confirmation_token(self) -> None:
+        original = self.call(
+            "add_expense",
+            {
+                "request_id": "large-correction-original",
+                "member": "Member 1",
+                "category": "Everyday",
+                "amount": "1.00",
+                "occurred_at": "2026-08-01T09:00:00-04:00",
+            },
+        )
+        transaction_id = original.structured_content["transaction"]["transaction_id"]
+        arguments = {
+            "request_id": "large-correction",
+            "transaction_id": transaction_id,
+            "amount": "600.00",
+        }
+        rejected = self.call("correct_expense", arguments)
+        self.assertTrue(rejected.is_error)
+        self.assertIn("prepare_correction", rejected.content[0].text)
+        self.assertEqual(self.ledger.list_spending(month="2026-08")["spent_cents"], 100)
+
+        prepared = self.call("prepare_correction", arguments)
+        self.assertFalse(prepared.is_error)
+        token = prepared.structured_content["confirmation_token"]
+        changed = self.call(
+            "correct_expense",
+            {**arguments, "amount": "601.00", "confirmation_token": token},
+        )
+        self.assertTrue(changed.is_error)
+        self.assertIn("does not match", changed.content[0].text)
+        accepted = self.call(
+            "correct_expense", {**arguments, "confirmation_token": token}
+        )
+        self.assertFalse(accepted.is_error)
+        self.assertEqual(accepted.structured_content["replacement"]["amount"], "600.00")
+
+    def test_correction_threshold_boundary_is_exact(self) -> None:
+        first = self.call(
+            "add_expense",
+            {
+                "request_id": "correction-boundary-first",
+                "member": "Member 1",
+                "category": "Everyday",
+                "amount": "1.00",
+            },
+        )
+        exactly_500 = self.call(
+            "correct_expense",
+            {
+                "request_id": "correction-exactly-500",
+                "transaction_id": first.structured_content["transaction"]["transaction_id"],
+                "amount": "500.00",
+            },
+        )
+        self.assertFalse(exactly_500.is_error)
+
+        second = self.call(
+            "add_expense",
+            {
+                "request_id": "correction-boundary-second",
+                "member": "Member 2",
+                "category": "Occasional",
+                "amount": "1.00",
+            },
+        )
+        over_500 = self.call(
+            "correct_expense",
+            {
+                "request_id": "correction-over-500",
+                "transaction_id": second.structured_content["transaction"]["transaction_id"],
+                "amount": "500.01",
+            },
+        )
+        self.assertTrue(over_500.is_error)
+        self.assertIn("prepare_correction", over_500.content[0].text)
 
     def test_ambiguous_parent_category_fails_closed(self) -> None:
         result = self.call(

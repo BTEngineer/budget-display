@@ -5,11 +5,12 @@ Assistant OS.
 
 ## Release status
 
-Version 0.9.0 is implemented on the development branch. It adds exact
+Version 0.9.1 is implemented on the development branch. It adds exact
 large-expense confirmations, audit-preserving corrections, atomic split
 expenses, read-only classification suggestions, and server-calculated budget
-outlooks. It is not merged, deployed to Home Assistant, or enabled in live
-Hermes. Version 0.8.0 remains the published `main` baseline until review.
+outlooks, including the P1 hardening described below. It is not merged,
+deployed to Home Assistant, or enabled in live Hermes. Version 0.8.0 remains
+the published `main` baseline until review.
 
 ## Configuration
 
@@ -40,7 +41,7 @@ only `suggest_expense_classification`; they never choose a category for a write.
 
 The endpoint is `http://<home-assistant-address>:8099/mcp`. Configure the MCP
 client with the same token as an `Authorization: Bearer ...` header. Keep the
-twelve-tool allowlist in `hermes-config.example.yaml`.
+thirteen-tool allowlist in `hermes-config.example.yaml`.
 
 The same listener exposes `/api/v1` for the Household Budget custom integration.
 It uses the same bearer token and Host allowlist. The API is intentionally
@@ -64,12 +65,18 @@ separate human-review flow.
 Split totals over $500 use `prepare_split_expense` and receive the same exact,
 short-lived protection across the total and every allocation.
 
+Preparation always resolves a concrete `occurred_at` value. Even when the
+caller omitted it from the prepare request, the returned timestamp must be
+passed unchanged to the committing tool. This prevents a reviewed transaction
+from crossing a day or month boundary before it is recorded.
+
 ## MCP tool surface
 
-The MCP server exposes twelve tools:
+The MCP server exposes thirteen tools:
 
 - `prepare_expense`
 - `add_expense`
+- `prepare_correction`
 - `correct_expense`
 - `prepare_split_expense`
 - `add_split_expense`
@@ -94,6 +101,17 @@ a reversal linked to the original and an active replacement linked back to the
 original. It rejects refunded, already reversed, missing, and non-expense
 targets. Exact retries are idempotent; conflicting reuse of the request ID is
 rejected. No historical row is overwritten.
+
+If the fully resolved replacement is over $500, `prepare_correction` is
+mandatory. Its signed token binds the target transaction, request ID, resolved
+member, category, amount, merchant, description, and occurrence timestamp.
+Changing an omitted or explicit field after preparation invalidates the token.
+
+Individual allocations belonging to a split expense are rejected by both
+`prepare_correction` and `correct_expense`. Version 0.9.1 deliberately fails
+closed here because replacing only one allocation would detach it from the
+split's stated total and source request. A future group-aware split correction
+requires a separately reviewed design.
 
 ### Split expenses
 
@@ -120,6 +138,11 @@ remaining funds, and categories projected to exceed budget. It uses integer
 cents and the configured household timezone. Hermes should present these
 server-calculated results rather than recomputing them from conversational
 memory.
+
+Every `as_of` ledger query requires both the transaction occurrence time and
+server recording time to be at or before the cutoff. Consequently, a
+correction recorded later cannot retroactively add its replacement to an
+earlier outlook while its balancing reversal remains outside that outlook.
 
 ## Transaction search and refunds
 
@@ -277,8 +300,8 @@ work. Queries, limits, identifiers, and cursors are bounded; malformed or
 tampered cursors fail closed. Normal logs must not contain complete transaction
 histories, bearer values, or credential-bearing exception details.
 
-The version 0.9 server and `hermes-config.example.yaml` define the exact
-twelve-tool development allowlist. A live Hermes deployment must not adopt that
+The version 0.9.1 server and `hermes-config.example.yaml` define the exact
+thirteen-tool development allowlist. A live Hermes deployment must not adopt that
 allowlist until this branch is reviewed and deployed. Resources, prompts, and
 parallel tool calls remain disabled.
 
@@ -304,12 +327,13 @@ member, and parent/child category totals.
 
 ### Validation status
 
-The version 0.9 development suite passes 62 automated tests. New coverage
-includes exact and tampered confirmation tokens, large split confirmation,
-correction relationships and idempotency, refunded-target rejection, atomic
-balanced splits, split search by source request, alias configuration and
-history-based classification, as-of forecasting, future-dated exclusion, and
-the complete twelve-tool MCP contract.
+The version 0.9.1 development suite passes 67 automated tests. P1 regression
+coverage includes large-correction preparation and mutation rejection, the
+exact $500 correction boundary, concrete single/split occurrence timestamps,
+month-boundary preservation, historical outlooks before and after a correction,
+and fail-closed split-allocation correction. Existing coverage continues to
+exercise atomic balanced splits, idempotency, classification, refunds, search,
+authentication, and the complete thirteen-tool MCP contract.
 
 The 0.8.0 source delivery passed 53 automated tests plus Python, JavaScript,
 JSON, lockfile, requirements-export, archive, and Git whitespace checks. The
@@ -336,7 +360,7 @@ cleanup procedure.
 
 ### Delivery status and operational boundary
 
-The following delivery record applies to version 0.8.0. Version 0.9 remains on
+The following delivery record applies to version 0.8.0. Version 0.9.1 remains on
 its development branch. The 0.8 source-delivery workflow is complete: it was
 reviewed on a feature branch, validated, pushed, and merged to `main` through
 pull request #3. That source delivery did not itself deploy or restart the live

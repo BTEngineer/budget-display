@@ -47,6 +47,7 @@ MAX_ENTRY_DESCRIPTION_LENGTH = 1000
 SUPPORTED_OPERATION_TYPES = {"expense", "refund", "reversal"}
 MAX_SPLIT_ALLOCATIONS = 20
 CONFIRMATION_TTL_SECONDS = 10 * 60
+LARGE_EXPENSE_CENTS = 50_000
 
 
 def _utc_now() -> str:
@@ -671,11 +672,9 @@ class BudgetLedger:
         description = self._bounded_entry_text(
             description, "description", MAX_ENTRY_DESCRIPTION_LENGTH
         )
-        normalized_timestamp = (
-            self._normalize_timestamp(occurred_at)[0]
-            if occurred_at is not None
-            else None
-        )
+        normalized_timestamp = self._normalize_timestamp(
+            occurred_at if occurred_at is not None else _utc_now()
+        )[0]
         with self._connection() as connection:
             member_id = self._member_id(connection, member)
             category_id = self._category_id(connection, category)
@@ -684,6 +683,7 @@ class BudgetLedger:
             ).fetchone()["name"]
             category_path = self._category_path(connection, category_id)
             payload = {
+                "confirmation_type": "expense",
                 "request_id": request_id,
                 "member": member_name,
                 "category": category_path,
@@ -722,11 +722,16 @@ class BudgetLedger:
         occurred_at: str | None = None,
     ) -> None:
         """Fail closed unless a confirmation token matches every expense field."""
+        if occurred_at is None:
+            raise BudgetValidationError(
+                "occurred_at returned by prepare_expense is required with confirmation_token"
+            )
         with self._connection() as connection:
             payload = self._decode_confirmation(connection, token)
             member_id = self._member_id(connection, member)
             category_id = self._category_id(connection, category)
             expected = {
+                "confirmation_type": "expense",
                 "request_id": self._validated_request_id(request_id),
                 "member": connection.execute(
                     "SELECT name FROM members WHERE id = ?", (member_id,)
@@ -739,11 +744,7 @@ class BudgetLedger:
                 "description": self._bounded_entry_text(
                     description, "description", MAX_ENTRY_DESCRIPTION_LENGTH
                 ),
-                "occurred_at": (
-                    self._normalize_timestamp(occurred_at)[0]
-                    if occurred_at is not None
-                    else None
-                ),
+                "occurred_at": self._normalize_timestamp(occurred_at)[0],
             }
         if any(payload.get(key) != value for key, value in expected.items()):
             raise BudgetValidationError(
@@ -761,6 +762,7 @@ class BudgetLedger:
         occurred_at: str | None = None,
     ) -> dict[str, object]:
         """Create a short-lived token bound to an exact split expense."""
+        bound_occurred_at = occurred_at if occurred_at is not None else _utc_now()
         with self._connection() as connection:
             payload = self._split_confirmation_payload(
                 connection,
@@ -769,7 +771,7 @@ class BudgetLedger:
                 allocations=allocations,
                 business_name=business_name,
                 description=description,
-                occurred_at=occurred_at,
+                occurred_at=bound_occurred_at,
             )
             expires_at = datetime.now(timezone.utc) + timedelta(
                 seconds=CONFIRMATION_TTL_SECONDS
@@ -788,6 +790,10 @@ class BudgetLedger:
         self, *, token: str, **values: object
     ) -> None:
         """Fail closed unless a token matches every split-expense field."""
+        if values.get("occurred_at") is None:
+            raise BudgetValidationError(
+                "occurred_at returned by prepare_split_expense is required with confirmation_token"
+            )
         with self._connection() as connection:
             actual = self._decode_confirmation(connection, token)
             expected = self._split_confirmation_payload(connection, **values)
@@ -912,7 +918,7 @@ class BudgetLedger:
             connection.commit()
             return result
 
-    def correct_expense(
+    def prepare_correction(
         self,
         *,
         request_id: str,
@@ -924,75 +930,81 @@ class BudgetLedger:
         description: str | None = None,
         occurred_at: str | None = None,
     ) -> dict[str, object]:
+        """Prepare an exact correction for explicit confirmation."""
+        with self._connection() as connection:
+            original, _, payload, _ = self._resolve_correction(
+                connection,
+                request_id=request_id,
+                transaction_id=transaction_id,
+                member=member,
+                category=category,
+                amount=amount,
+                business_name=business_name,
+                description=description,
+                occurred_at=occurred_at,
+            )
+            if original["reversed_by_id"] is not None:
+                raise BudgetValidationError("a reversed expense cannot be corrected")
+            if original["refunded_cents"]:
+                raise BudgetValidationError("a refunded expense cannot be corrected")
+            if original["split_group_id"] is not None:
+                raise BudgetValidationError(
+                    "individual split allocations cannot be corrected"
+                )
+            expires_at = datetime.now(timezone.utc) + timedelta(
+                seconds=CONFIRMATION_TTL_SECONDS
+            )
+            token = self._encode_confirmation(
+                connection,
+                {**payload, "expires_at": int(expires_at.timestamp())},
+            )
+        return {
+            "correction": {
+                **payload,
+                "amount": self._decimal_amount(int(payload["amount_cents"])),
+                "currency": "USD",
+            },
+            "confirmation_token": token,
+            "expires_at": expires_at.isoformat(timespec="seconds"),
+        }
+
+    def correct_expense(
+        self,
+        *,
+        request_id: str,
+        transaction_id: str,
+        member: str | None = None,
+        category: str | None = None,
+        amount: str | Decimal | None = None,
+        business_name: str | None = None,
+        description: str | None = None,
+        occurred_at: str | None = None,
+        confirmation_token: str | None = None,
+    ) -> dict[str, object]:
         """Atomically reverse an expense and create its corrected replacement."""
-        request_id = self._validated_request_id(request_id)
-        transaction_id = transaction_id.strip()
-        if not transaction_id or len(transaction_id) > MAX_SEARCH_TEXT_LENGTH:
-            raise BudgetValidationError("transaction_id is invalid")
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            original = connection.execute(
-                """
-                SELECT entry.*, members.name AS member_name,
-                       categories.name AS category_name,
-                       parent.name AS parent_category_name,
-                       reversed_by.id AS reversed_by_id,
-                       COALESCE((SELECT SUM(-refund.amount_cents)
-                                 FROM ledger_entries refund
-                                 WHERE refund.refunds_entry_id = entry.id
-                                   AND refund.operation_type = 'refund'), 0) AS refunded_cents
-                FROM ledger_entries entry
-                JOIN members ON members.id = entry.member_id
-                JOIN categories ON categories.id = entry.category_id
-                LEFT JOIN categories parent ON parent.id = categories.parent_id
-                LEFT JOIN ledger_entries reversed_by
-                  ON reversed_by.reverses_entry_id = entry.id
-                WHERE entry.transaction_id = ? AND entry.operation_type = 'expense'
-                """,
-                (transaction_id,),
-            ).fetchone()
-            if original is None:
-                raise BudgetValidationError("expense transaction was not found")
-
-            resolved_member_id = (
-                self._member_id(connection, member)
-                if member is not None
-                else original["member_id"]
-            )
-            resolved_category_id = (
-                self._category_id(connection, category)
-                if category is not None
-                else original["category_id"]
-            )
-            resolved_cents = _parse_cents(amount) if amount is not None else original["amount_cents"]
-            resolved_business = (
-                self._bounded_entry_text(
-                    business_name, "business_name", MAX_BUSINESS_NAME_LENGTH
+            original, payload, confirmation_payload, resolved_month = (
+                self._resolve_correction(
+                    connection,
+                    request_id=request_id,
+                    transaction_id=transaction_id,
+                    member=member,
+                    category=category,
+                    amount=amount,
+                    business_name=business_name,
+                    description=description,
+                    occurred_at=occurred_at,
                 )
-                if business_name is not None
-                else original["business_name"]
             )
-            resolved_description = (
-                self._bounded_entry_text(
-                    description, "description", MAX_ENTRY_DESCRIPTION_LENGTH
-                )
-                if description is not None
-                else original["description"]
-            )
-            resolved_timestamp, resolved_month = (
-                self._normalize_timestamp(occurred_at)
-                if occurred_at is not None
-                else (original["occurred_at"], original["local_month"])
-            )
-            payload = {
-                "transaction_id": transaction_id,
-                "member_id": resolved_member_id,
-                "category_id": resolved_category_id,
-                "amount_cents": resolved_cents,
-                "business_name": resolved_business,
-                "description": resolved_description,
-                "occurred_at": resolved_timestamp,
-            }
+            request_id = str(confirmation_payload["request_id"])
+            transaction_id = str(confirmation_payload["transaction_id"])
+            resolved_member_id = int(payload["member_id"])
+            resolved_category_id = int(payload["category_id"])
+            resolved_cents = int(payload["amount_cents"])
+            resolved_business = str(payload["business_name"])
+            resolved_description = str(payload["description"])
+            resolved_timestamp = str(payload["occurred_at"])
             payload_digest = self._payload_digest(payload)
             existing_operation = connection.execute(
                 "SELECT * FROM multi_entry_operations WHERE request_id = ?",
@@ -1028,6 +1040,25 @@ class BudgetLedger:
                 raise BudgetValidationError("a reversed expense cannot be corrected")
             if original["refunded_cents"]:
                 raise BudgetValidationError("a refunded expense cannot be corrected")
+            if original["split_group_id"] is not None:
+                raise BudgetValidationError(
+                    "individual split allocations cannot be corrected"
+                )
+            if resolved_cents > LARGE_EXPENSE_CENTS:
+                if not confirmation_token:
+                    raise BudgetValidationError(
+                        "corrected expense exceeds $500; call prepare_correction and retry with its exact confirmation_token"
+                    )
+                actual_confirmation = self._decode_confirmation(
+                    connection, confirmation_token
+                )
+                if any(
+                    actual_confirmation.get(key) != value
+                    for key, value in confirmation_payload.items()
+                ):
+                    raise BudgetValidationError(
+                        "confirmation token does not match the exact correction payload"
+                    )
 
             now = _utc_now()
             reversal = connection.execute(
@@ -1866,36 +1897,37 @@ class BudgetLedger:
         days_in_month = calendar.monthrange(target.year, target.month)[1]
         elapsed_days = local_as_of.day if target_key == current_key else days_in_month
         spending = self.list_spending(month=month)
-        category_spent_as_of: dict[str, int] | None = None
-        if target_key == current_key:
-            with self._connection() as connection:
-                spent_cents = int(
-                    connection.execute(
-                        """
-                        SELECT COALESCE(SUM(amount_cents), 0) AS cents
-                        FROM ledger_entries
-                        WHERE local_month = ? AND occurred_at <= ?
-                        """,
-                        (month, as_of_utc.isoformat(timespec="seconds")),
-                    ).fetchone()["cents"]
-                )
-                category_spent_as_of = {
-                    row["name"]: int(row["cents"])
-                    for row in connection.execute(
-                        """
-                        SELECT root.name, COALESCE(SUM(entry.amount_cents), 0) AS cents
-                        FROM ledger_entries entry
-                        JOIN categories category ON category.id = entry.category_id
-                        JOIN categories root
-                          ON root.id = COALESCE(category.parent_id, category.id)
-                        WHERE entry.local_month = ? AND entry.occurred_at <= ?
-                        GROUP BY root.id
-                        """,
-                        (month, as_of_utc.isoformat(timespec="seconds")),
-                    ).fetchall()
-                }
-        else:
-            spent_cents = int(spending["spent_cents"])
+        cutoff = as_of_utc.isoformat(timespec="seconds")
+        with self._connection() as connection:
+            spent_cents = int(
+                connection.execute(
+                    """
+                    SELECT COALESCE(SUM(amount_cents), 0) AS cents
+                    FROM ledger_entries
+                    WHERE local_month = ?
+                      AND occurred_at <= ?
+                      AND created_at <= ?
+                    """,
+                    (month, cutoff, cutoff),
+                ).fetchone()["cents"]
+            )
+            category_spent_as_of = {
+                row["name"]: int(row["cents"])
+                for row in connection.execute(
+                    """
+                    SELECT root.name, COALESCE(SUM(entry.amount_cents), 0) AS cents
+                    FROM ledger_entries entry
+                    JOIN categories category ON category.id = entry.category_id
+                    JOIN categories root
+                      ON root.id = COALESCE(category.parent_id, category.id)
+                    WHERE entry.local_month = ?
+                      AND entry.occurred_at <= ?
+                      AND entry.created_at <= ?
+                    GROUP BY root.id
+                    """,
+                    (month, cutoff, cutoff),
+                ).fetchall()
+            }
         projected_cents = (
             spent_cents
             if elapsed_days == days_in_month
@@ -1914,8 +1946,9 @@ class BudgetLedger:
         comparison_day = min(elapsed_days, previous_days)
         with self._connection() as connection:
             previous_rows = connection.execute(
-                "SELECT amount_cents, occurred_at FROM ledger_entries WHERE local_month = ?",
-                (previous_month_key,),
+                "SELECT amount_cents, occurred_at FROM ledger_entries "
+                "WHERE local_month = ? AND created_at <= ?",
+                (previous_month_key, cutoff),
             ).fetchall()
         previous_same_point_cents = sum(
             int(row["amount_cents"])
@@ -1929,11 +1962,7 @@ class BudgetLedger:
         for row in spending["category_rows"]:
             if row["budget_cents"] is None:
                 continue
-            row_spent_cents = (
-                int(row["spent_cents"])
-                if category_spent_as_of is None
-                else category_spent_as_of.get(str(row["name"]), 0)
-            )
+            row_spent_cents = category_spent_as_of.get(str(row["name"]), 0)
             category_projected = (
                 row_spent_cents
                 if elapsed_days == days_in_month
@@ -2237,6 +2266,101 @@ class BudgetLedger:
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
+    def _resolve_correction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        request_id: str,
+        transaction_id: str,
+        member: str | None,
+        category: str | None,
+        amount: str | Decimal | None,
+        business_name: str | None,
+        description: str | None,
+        occurred_at: str | None,
+    ) -> tuple[sqlite3.Row, dict[str, object], dict[str, object], str]:
+        request_id = self._validated_request_id(request_id)
+        transaction_id = transaction_id.strip()
+        if not transaction_id or len(transaction_id) > MAX_SEARCH_TEXT_LENGTH:
+            raise BudgetValidationError("transaction_id is invalid")
+        original = connection.execute(
+            """
+            SELECT entry.*, members.name AS member_name,
+                   categories.name AS category_name,
+                   parent.name AS parent_category_name,
+                   reversed_by.id AS reversed_by_id,
+                   COALESCE((SELECT SUM(-refund.amount_cents)
+                             FROM ledger_entries refund
+                             WHERE refund.refunds_entry_id = entry.id
+                               AND refund.operation_type = 'refund'), 0) AS refunded_cents
+            FROM ledger_entries entry
+            JOIN members ON members.id = entry.member_id
+            JOIN categories ON categories.id = entry.category_id
+            LEFT JOIN categories parent ON parent.id = categories.parent_id
+            LEFT JOIN ledger_entries reversed_by
+              ON reversed_by.reverses_entry_id = entry.id
+            WHERE entry.transaction_id = ? AND entry.operation_type = 'expense'
+            """,
+            (transaction_id,),
+        ).fetchone()
+        if original is None:
+            raise BudgetValidationError("expense transaction was not found")
+        resolved_member_id = (
+            self._member_id(connection, member)
+            if member is not None
+            else original["member_id"]
+        )
+        resolved_category_id = (
+            self._category_id(connection, category)
+            if category is not None
+            else original["category_id"]
+        )
+        resolved_cents = (
+            _parse_cents(amount) if amount is not None else original["amount_cents"]
+        )
+        resolved_business = (
+            self._bounded_entry_text(
+                business_name, "business_name", MAX_BUSINESS_NAME_LENGTH
+            )
+            if business_name is not None
+            else original["business_name"]
+        )
+        resolved_description = (
+            self._bounded_entry_text(
+                description, "description", MAX_ENTRY_DESCRIPTION_LENGTH
+            )
+            if description is not None
+            else original["description"]
+        )
+        resolved_timestamp, resolved_month = (
+            self._normalize_timestamp(occurred_at)
+            if occurred_at is not None
+            else (original["occurred_at"], original["local_month"])
+        )
+        persistence_payload = {
+            "transaction_id": transaction_id,
+            "member_id": resolved_member_id,
+            "category_id": resolved_category_id,
+            "amount_cents": resolved_cents,
+            "business_name": resolved_business,
+            "description": resolved_description,
+            "occurred_at": resolved_timestamp,
+        }
+        confirmation_payload = {
+            "confirmation_type": "correction",
+            "request_id": request_id,
+            "transaction_id": transaction_id,
+            "member": connection.execute(
+                "SELECT name FROM members WHERE id = ?", (resolved_member_id,)
+            ).fetchone()["name"],
+            "category": self._category_path(connection, resolved_category_id),
+            "amount_cents": resolved_cents,
+            "business_name": resolved_business,
+            "description": resolved_description,
+            "occurred_at": resolved_timestamp,
+        }
+        return original, persistence_payload, confirmation_payload, resolved_month
+
     def _split_confirmation_payload(
         self,
         connection: sqlite3.Connection,
@@ -2289,6 +2413,7 @@ class BudgetLedger:
         if occurred_at is not None and not isinstance(occurred_at, str):
             raise BudgetValidationError("occurred_at must be an ISO 8601 timestamp")
         return {
+            "confirmation_type": "split_expense",
             "request_id": self._validated_request_id(request_id),
             "total_cents": total_cents,
             "allocations": normalized,

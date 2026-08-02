@@ -13,10 +13,9 @@ from typing import Any
 
 from mcp.server import MCPServer
 
-from .ledger import BudgetLedger, BudgetValidationError
+from .ledger import BudgetLedger, BudgetValidationError, LARGE_EXPENSE_CENTS
 
 
-LARGE_EXPENSE_CENTS = 50_000
 MAX_REQUEST_ID_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 500
 MAX_BUSINESS_NAME_LENGTH = 200
@@ -147,6 +146,33 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         )
 
     @server.tool()
+    def prepare_correction(
+        request_id: str,
+        transaction_id: str,
+        member: str | None = None,
+        category: str | None = None,
+        amount: str | None = None,
+        business_name: str | None = None,
+        description: str | None = None,
+        occurred_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Prepare an exact correction for explicit confirmation.
+
+        The returned token is required when the resolved replacement exceeds
+        $500 and is bound to the target plus every resolved replacement field.
+        """
+        return ready_ledger().prepare_correction(
+            request_id=request_id,
+            transaction_id=transaction_id,
+            member=member,
+            category=category,
+            amount=amount,
+            business_name=business_name,
+            description=description,
+            occurred_at=occurred_at,
+        )
+
+    @server.tool()
     def correct_expense(
         request_id: str,
         transaction_id: str,
@@ -156,6 +182,7 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         business_name: str | None = None,
         description: str | None = None,
         occurred_at: str | None = None,
+        confirmation_token: str | None = None,
     ) -> dict[str, Any]:
         """Correct a verified expense without deleting history.
 
@@ -171,6 +198,7 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
             business_name=business_name,
             description=description,
             occurred_at=occurred_at,
+            confirmation_token=confirmation_token,
         )
 
     @server.tool()
