@@ -1071,6 +1071,70 @@ class BudgetLedgerTests(unittest.TestCase):
         self.assertEqual(sum(int(Decimal(row["amount"]) * 100) for row in searched), 3000)
         self.assertTrue(all(row["status"] == "active" for row in searched))
 
+    def test_split_allocations_cannot_be_undone_individually(self) -> None:
+        split = self.ledger.add_split_expense(
+            request_id="protected-undo-split",
+            total_amount="30.00",
+            allocations=[
+                {"member": "Member 1", "category": "Everyday", "amount": "10.00"},
+                {"member": "Member 2", "category": "Occasional", "amount": "20.00"},
+            ],
+            occurred_at="2026-08-01T09:00:00-04:00",
+        )
+        with self.assertRaisesRegex(BudgetValidationError, "split allocations"):
+            self.ledger.undo_last_expense(
+                request_id="undo-split-by-member", member="Member 1"
+            )
+        with self.ledger._connection() as connection:
+            entry_id = connection.execute(
+                "SELECT id FROM ledger_entries WHERE transaction_id = ?",
+                (split["allocations"][0]["transaction_id"],),
+            ).fetchone()["id"]
+        with self.assertRaisesRegex(BudgetValidationError, "split allocations"):
+            self.ledger.undo_last_expense(
+                request_id="undo-split-by-id", entry_id=entry_id
+            )
+        searched = self.ledger.search_transactions(
+            request_id="protected-undo-split", status="all"
+        )["transactions"]
+        self.assertEqual(len(searched), 2)
+        self.assertTrue(all(row["status"] == "active" for row in searched))
+        self.assertEqual(self.ledger.list_spending(month="2026-08")["spent_cents"], 3000)
+
+    def test_maximum_runtime_split_confirmation_round_trips(self) -> None:
+        member = "m" * 80
+        parent = "p" * 80
+        child = "c" * 80
+        category = f"{parent}/{child}"
+        database = Path(self.temporary_directory.name) / "maximum-split-token.db"
+        ledger = BudgetLedger(
+            database,
+            members=(member,),
+            categories=((parent, None, 100_000), (child, parent, None)),
+        )
+        ledger.initialize()
+        allocations = [
+            {"member": member, "category": category, "amount": "30.00"}
+            for _ in range(20)
+        ]
+        values = {
+            "request_id": "r" * 200,
+            "total_amount": "600.00",
+            "allocations": allocations,
+            "business_name": "b" * 200,
+            "description": "d" * 1000,
+            "occurred_at": "2026-08-01T09:00:00-04:00",
+        }
+        prepared = ledger.prepare_split_expense(**values)
+        self.assertGreater(len(prepared["confirmation_token"]), 4096)
+        committed = ledger.add_split_expense(
+            **values,
+            confirmation_token=prepared["confirmation_token"],
+            require_confirmation=True,
+        )
+        self.assertFalse(committed["duplicate"])
+        self.assertEqual(len(committed["allocations"]), 20)
+
 
 if __name__ == "__main__":
     unittest.main()

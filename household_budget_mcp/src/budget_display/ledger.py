@@ -49,6 +49,7 @@ SUPPORTED_OPERATION_TYPES = {"expense", "refund", "reversal"}
 MAX_SPLIT_ALLOCATIONS = 20
 CONFIRMATION_TTL_SECONDS = 10 * 60
 LARGE_EXPENSE_CENTS = 50_000
+MAX_CONFIRMATION_TOKEN_LENGTH = 16_384
 
 
 def _utc_now() -> str:
@@ -728,28 +729,16 @@ class BudgetLedger:
                 "occurred_at returned by prepare_expense is required with confirmation_token"
             )
         with self._connection() as connection:
-            payload = self._decode_confirmation(connection, token)
-            member_id = self._member_id(connection, member)
-            category_id = self._category_id(connection, category)
-            expected = {
-                "confirmation_type": "expense",
-                "request_id": self._validated_request_id(request_id),
-                "member": connection.execute(
-                    "SELECT name FROM members WHERE id = ?", (member_id,)
-                ).fetchone()["name"],
-                "category": self._category_path(connection, category_id),
-                "amount_cents": _parse_cents(amount),
-                "business_name": self._bounded_entry_text(
-                    business_name, "business_name", MAX_BUSINESS_NAME_LENGTH
-                ),
-                "description": self._bounded_entry_text(
-                    description, "description", MAX_ENTRY_DESCRIPTION_LENGTH
-                ),
-                "occurred_at": self._normalize_timestamp(occurred_at)[0],
-            }
-        if any(payload.get(key) != value for key, value in expected.items()):
-            raise BudgetValidationError(
-                "confirmation token does not match the exact expense payload"
+            self._validate_expense_confirmation(
+                connection,
+                token=token,
+                request_id=request_id,
+                member=member,
+                category=category,
+                amount=amount,
+                business_name=business_name,
+                description=description,
+                occurred_at=occurred_at,
             )
 
     def prepare_split_expense(
@@ -796,12 +785,7 @@ class BudgetLedger:
                 "occurred_at returned by prepare_split_expense is required with confirmation_token"
             )
         with self._connection() as connection:
-            actual = self._decode_confirmation(connection, token)
-            expected = self._split_confirmation_payload(connection, **values)
-        if any(actual.get(key) != value for key, value in expected.items()):
-            raise BudgetValidationError(
-                "confirmation token does not match the exact split expense payload"
-            )
+            self._validate_split_confirmation(connection, token=token, **values)
 
     def add_expense(
         self,
@@ -813,6 +797,8 @@ class BudgetLedger:
         business_name: str = "",
         description: str = "",
         occurred_at: str | None = None,
+        confirmation_token: str | None = None,
+        require_confirmation: bool = False,
     ) -> dict[str, object]:
         request_id = request_id.strip()
         if not request_id:
@@ -894,6 +880,22 @@ class BudgetLedger:
             timestamp, local_month = self._normalize_timestamp(
                 occurred_at if occurred_at is not None else _utc_now()
             )
+            if require_confirmation and cents > LARGE_EXPENSE_CENTS:
+                if not confirmation_token:
+                    raise BudgetValidationError(
+                        "expense exceeds $500; call prepare_expense and retry with its exact confirmation_token"
+                    )
+                self._validate_expense_confirmation(
+                    connection,
+                    token=confirmation_token,
+                    request_id=request_id,
+                    member=member,
+                    category=category,
+                    amount=amount,
+                    business_name=clean_business_name,
+                    description=clean_description,
+                    occurred_at=occurred_at,
+                )
             cursor = connection.execute(
                 """
                 INSERT INTO ledger_entries(
@@ -1128,6 +1130,8 @@ class BudgetLedger:
         business_name: str = "",
         description: str = "",
         occurred_at: str | None = None,
+        confirmation_token: str | None = None,
+        require_confirmation: bool = False,
     ) -> dict[str, object]:
         """Atomically record one purchase allocated across people or categories."""
         request_id = self._validated_request_id(request_id)
@@ -1208,6 +1212,26 @@ class BudgetLedger:
             ).fetchone():
                 raise DuplicateRequestError(
                     "request_id already belongs to a different ledger operation"
+                )
+
+            if require_confirmation and total_cents > LARGE_EXPENSE_CENTS:
+                if not confirmation_token:
+                    raise BudgetValidationError(
+                        "split expense exceeds $500; call prepare_split_expense and retry with its exact confirmation_token"
+                    )
+                if occurred_at is None:
+                    raise BudgetValidationError(
+                        "occurred_at returned by prepare_split_expense is required with confirmation_token"
+                    )
+                self._validate_split_confirmation(
+                    connection,
+                    token=confirmation_token,
+                    request_id=request_id,
+                    total_amount=total_amount,
+                    allocations=allocations,
+                    business_name=business_name,
+                    description=description,
+                    occurred_at=occurred_at,
                 )
 
             group_id = f"split_{uuid4().hex}"
@@ -1330,6 +1354,10 @@ class BudgetLedger:
             ).fetchone()
             if original is None:
                 raise BudgetValidationError("no expense is available to undo")
+            if original["split_group_id"] is not None:
+                raise BudgetValidationError(
+                    "individual split allocations cannot be undone; group-aware undo is not implemented"
+                )
             cursor = connection.execute(
                 """
                 INSERT INTO ledger_entries(
@@ -2399,6 +2427,61 @@ class BudgetLedger:
         }
         return original, persistence_payload, confirmation_payload, resolved_month
 
+    def _validate_expense_confirmation(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        token: str,
+        request_id: str,
+        member: str,
+        category: str,
+        amount: str | Decimal,
+        business_name: str,
+        description: str,
+        occurred_at: str | None,
+    ) -> None:
+        if occurred_at is None:
+            raise BudgetValidationError(
+                "occurred_at returned by prepare_expense is required with confirmation_token"
+            )
+        actual = self._decode_confirmation(connection, token)
+        member_id = self._member_id(connection, member)
+        category_id = self._category_id(connection, category)
+        expected = {
+            "confirmation_type": "expense",
+            "request_id": self._validated_request_id(request_id),
+            "member": connection.execute(
+                "SELECT name FROM members WHERE id = ?", (member_id,)
+            ).fetchone()["name"],
+            "category": self._category_path(connection, category_id),
+            "amount_cents": _parse_cents(amount),
+            "business_name": self._bounded_entry_text(
+                business_name, "business_name", MAX_BUSINESS_NAME_LENGTH
+            ),
+            "description": self._bounded_entry_text(
+                description, "description", MAX_ENTRY_DESCRIPTION_LENGTH
+            ),
+            "occurred_at": self._normalize_timestamp(occurred_at)[0],
+        }
+        if any(actual.get(key) != value for key, value in expected.items()):
+            raise BudgetValidationError(
+                "confirmation token does not match the exact expense payload"
+            )
+
+    def _validate_split_confirmation(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        token: str,
+        **values: object,
+    ) -> None:
+        actual = self._decode_confirmation(connection, token)
+        expected = self._split_confirmation_payload(connection, **values)
+        if any(actual.get(key) != value for key, value in expected.items()):
+            raise BudgetValidationError(
+                "confirmation token does not match the exact split expense payload"
+            )
+
     def _split_confirmation_payload(
         self,
         connection: sqlite3.Connection,
@@ -2554,13 +2637,16 @@ class BudgetLedger:
         signature = hmac.new(
             cls._confirmation_secret(connection), encoded_payload, hashlib.sha256
         ).digest()
-        return base64.urlsafe_b64encode(signature + encoded_payload).decode("ascii")
+        token = base64.urlsafe_b64encode(signature + encoded_payload).decode("ascii")
+        if len(token) > MAX_CONFIRMATION_TOKEN_LENGTH:
+            raise BudgetValidationError("confirmation payload is too large")
+        return token
 
     @classmethod
     def _decode_confirmation(
         cls, connection: sqlite3.Connection, token: str
     ) -> dict[str, object]:
-        if not token or len(token) > 4096:
+        if not token or len(token) > MAX_CONFIRMATION_TOKEN_LENGTH:
             raise BudgetValidationError("confirmation token is invalid")
         try:
             raw = base64.b64decode(token.encode("ascii"), altchars=b"-_", validate=True)

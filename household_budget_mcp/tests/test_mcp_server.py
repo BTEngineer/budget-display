@@ -218,6 +218,87 @@ class BudgetMCPServerTests(unittest.TestCase):
         self.assertFalse(accepted.is_error)
         self.assertEqual(accepted.structured_content["total_amount"], "600.00")
 
+    def test_large_write_retries_are_idempotent_without_a_live_token(self) -> None:
+        expense_arguments = {
+            "request_id": "large-expense-retry",
+            "member": "Member 1",
+            "category": "Everyday",
+            "amount": "600.00",
+            "occurred_at": "2026-08-03T09:00:00-04:00",
+        }
+        expense_prepared = self.call("prepare_expense", expense_arguments)
+        expense_first = self.call(
+            "add_expense",
+            {
+                **expense_arguments,
+                "confirmation_token": expense_prepared.structured_content[
+                    "confirmation_token"
+                ],
+            },
+        )
+        self.assertFalse(expense_first.is_error)
+        expense_retry = self.call("add_expense", expense_arguments)
+        self.assertFalse(expense_retry.is_error)
+        self.assertTrue(expense_retry.structured_content["duplicate"])
+
+        with self.ledger._connection() as connection:
+            expired_token = self.ledger._encode_confirmation(
+                connection, {"expires_at": 0}
+            )
+        expired_expense_retry = self.call(
+            "add_expense",
+            {**expense_arguments, "confirmation_token": expired_token},
+        )
+        self.assertFalse(expired_expense_retry.is_error)
+        self.assertTrue(expired_expense_retry.structured_content["duplicate"])
+        conflicting_expense = self.call(
+            "add_expense", {**expense_arguments, "amount": "601.00"}
+        )
+        self.assertTrue(conflicting_expense.is_error)
+        self.assertIn("different ledger operation", conflicting_expense.content[0].text)
+
+        split_arguments = {
+            "request_id": "large-split-retry",
+            "total_amount": "600.00",
+            "allocations": [
+                {"member": "Member 1", "category": "Everyday", "amount": "300.00"},
+                {"member": "Member 2", "category": "Occasional", "amount": "300.00"},
+            ],
+            "occurred_at": "2026-08-04T09:00:00-04:00",
+        }
+        split_prepared = self.call("prepare_split_expense", split_arguments)
+        split_first = self.call(
+            "add_split_expense",
+            {
+                **split_arguments,
+                "confirmation_token": split_prepared.structured_content[
+                    "confirmation_token"
+                ],
+            },
+        )
+        self.assertFalse(split_first.is_error)
+        split_retry = self.call("add_split_expense", split_arguments)
+        self.assertFalse(split_retry.is_error)
+        self.assertTrue(split_retry.structured_content["duplicate"])
+        expired_split_retry = self.call(
+            "add_split_expense",
+            {**split_arguments, "confirmation_token": expired_token},
+        )
+        self.assertFalse(expired_split_retry.is_error)
+        self.assertTrue(expired_split_retry.structured_content["duplicate"])
+        conflicting_split = self.call(
+            "add_split_expense",
+            {
+                **split_arguments,
+                "allocations": [
+                    {"member": "Member 1", "category": "Everyday", "amount": "299.00"},
+                    {"member": "Member 2", "category": "Occasional", "amount": "301.00"},
+                ],
+            },
+        )
+        self.assertTrue(conflicting_split.is_error)
+        self.assertIn("different ledger operation", conflicting_split.content[0].text)
+
     def test_large_correction_requires_exact_confirmation_token(self) -> None:
         original = self.call(
             "add_expense",

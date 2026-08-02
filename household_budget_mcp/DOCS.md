@@ -66,6 +66,17 @@ separate human-review flow.
 Split totals over $500 use `prepare_split_expense` and receive the same exact,
 short-lived protection across the total and every allocation.
 
+The confirmation decoder accepts the maximum token size produced by every
+valid runtime field and allocation limit. Preparation also refuses payloads
+that would exceed the bounded decoder ceiling rather than returning a token
+that cannot be committed.
+
+Confirmation is required only for the first large write. Exact retries are
+resolved through request-ID idempotency before token validation, allowing safe
+recovery from lost responses after a token expires. A changed amount,
+allocation, timestamp, or other bound field remains a conflicting request and
+is rejected without mutation.
+
 Preparation always resolves a concrete `occurred_at` value. Even when the
 caller omitted it from the prepare request, the returned timestamp must be
 passed unchanged to the committing tool. This prevents a reviewed transaction
@@ -119,6 +130,11 @@ Individual allocations belonging to a split expense are rejected by both
 closed here because replacing only one allocation would detach it from the
 split's stated total and source request. A future group-aware split correction
 requires a separately reviewed design.
+
+`undo_last_expense` also fails closed when its selected expense is a split
+allocation, whether selection occurs by member or internal entry ID. A future
+undo operation must reverse the complete split atomically and preserve its
+declared total.
 
 ### Split expenses
 
@@ -339,7 +355,7 @@ member, and parent/child category totals.
 
 ### Validation status
 
-The version 0.9.1 development suite passes 71 automated tests. P1 regression
+The version 0.9.1 development suite passes 74 automated tests. P1 regression
 coverage includes large-correction preparation and mutation rejection, the
 exact $500 correction boundary, concrete single/split occurrence timestamps,
 month-boundary preservation, historical outlooks before and after a correction,
@@ -351,6 +367,11 @@ P2 regression coverage verifies the shared 1,000-character prepare/commit
 description boundary, lexical alias matching, one classification-history sample
 per split source purchase and category, and no-op correction rejection without
 audit-log noise.
+
+Final hardening coverage includes maximum-size 20-allocation confirmation
+round trips, fail-closed split undo by member and entry ID, exact large expense
+and split retries with missing or expired tokens, and conflicting tokenless
+retry rejection.
 
 The 0.8.0 source delivery passed 53 automated tests plus Python, JavaScript,
 JSON, lockfile, requirements-export, archive, and Git whitespace checks. The

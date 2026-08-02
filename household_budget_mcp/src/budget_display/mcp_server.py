@@ -16,7 +16,6 @@ from mcp.server import MCPServer
 from .ledger import (
     BudgetLedger,
     BudgetValidationError,
-    LARGE_EXPENSE_CENTS,
     MAX_ENTRY_DESCRIPTION_LENGTH,
 )
 
@@ -123,23 +122,7 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
             raise BudgetValidationError(
                 f"business_name cannot exceed {MAX_BUSINESS_NAME_LENGTH} characters"
             )
-        cents = _amount_cents_for_confirmation(amount)
         active_ledger = ready_ledger()
-        if cents > LARGE_EXPENSE_CENTS:
-            if not confirmation_token:
-                raise BudgetValidationError(
-                    "expense exceeds $500; call prepare_expense and retry with its exact confirmation_token"
-                )
-            active_ledger.validate_expense_confirmation(
-                token=confirmation_token,
-                request_id=clean_request_id,
-                member=member,
-                category=category,
-                amount=amount,
-                business_name=clean_business_name,
-                description=clean_description,
-                occurred_at=occurred_at,
-            )
         return active_ledger.add_expense(
             request_id=clean_request_id,
             member=member,
@@ -148,6 +131,8 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
             business_name=clean_business_name,
             description=clean_description,
             occurred_at=occurred_at,
+            confirmation_token=confirmation_token,
+            require_confirmation=True,
         )
 
     @server.tool()
@@ -240,28 +225,15 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         Each allocation needs member, category, and positive decimal amount.
         Allocations must add up exactly to total_amount or nothing is recorded.
         """
-        active_ledger = ready_ledger()
-        if _amount_cents_for_confirmation(total_amount) > LARGE_EXPENSE_CENTS:
-            if not confirmation_token:
-                raise BudgetValidationError(
-                    "split expense exceeds $500; call prepare_split_expense and retry with its exact confirmation_token"
-                )
-            active_ledger.validate_split_confirmation(
-                token=confirmation_token,
-                request_id=request_id,
-                total_amount=total_amount,
-                allocations=allocations,
-                business_name=business_name,
-                description=description,
-                occurred_at=occurred_at,
-            )
-        return active_ledger.add_split_expense(
+        return ready_ledger().add_split_expense(
             request_id=request_id,
             total_amount=total_amount,
             allocations=allocations,
             business_name=business_name,
             description=description,
             occurred_at=occurred_at,
+            confirmation_token=confirmation_token,
+            require_confirmation=True,
         )
 
     @server.tool()

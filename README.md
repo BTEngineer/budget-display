@@ -87,11 +87,15 @@ timestamp that must be passed unchanged to the committing tool.
 `correct_expense` atomically records a linked reversal and replacement, never
 an in-place edit. Corrections whose resolved replacement exceeds $500 require
 an exact token from `prepare_correction`. Individual split allocations cannot
-be corrected because doing so would break split reconciliation. No-op
-corrections are rejected without adding reversal records.
+be corrected or undone because doing so would break split reconciliation.
+No-op corrections are rejected without adding reversal records.
 `add_split_expense` records all allocations or none and requires their amounts
 to equal the stated total. Classification and outlook tools are read-only; a
 category suggestion never authorizes a ledger write.
+
+Large-write confirmation applies to the first mutation. Once an exact request
+ID and payload have committed, a retry returns the existing result even if the
+short-lived token is missing or expired; conflicting reuse still fails closed.
 
 The app also consumes Home Assistant's internal `mqtt` service and publishes
 retained discovery/state messages for total spent, total remaining, and each
