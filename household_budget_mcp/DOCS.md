@@ -3,14 +3,17 @@
 This app hosts the household SQLite ledger and its narrow MCP interface on Home
 Assistant OS.
 
+For the versioned 13-command tool contract, see the
+[Household Budget MCP 0.9.1 reference](../docs/household-budget-mcp-0.9.1.md).
+
 ## Release status
 
-Version 0.8.0 is implemented and published on the repository's `main` branch.
-The server-side transaction search and refund work that was previously recorded
-as a change plan is now shipped behavior and is documented below in the present
-tense. The Home Assistant app update, Hermes configuration rollout, and live
-financial verification remain separate operational steps; publishing the source
-does not perform those actions automatically.
+Version 0.9.1 is implemented on the development branch. It adds exact
+large-expense confirmations, audit-preserving corrections, atomic split
+expenses, read-only classification suggestions, and server-calculated budget
+outlooks, including the P1 hardening described below. It is not merged,
+deployed to Home Assistant, or enabled in live Hermes. Version 0.8.0 remains
+the published `main` baseline until review.
 
 ## Configuration
 
@@ -33,11 +36,16 @@ Configuration changes deactivate removed names for new expenses without
 deleting their historical ledger entries. `household_timezone` controls which
 local calendar month receives each expense.
 
+Optional `classification_aliases` entries contain `term` and `category`.
+Categories must be exact configured paths such as `Meals/Food`. Aliases affect
+only `suggest_expense_classification`; they never choose a category for a write.
+Terms match at lexical boundaries rather than arbitrary substrings.
+
 ## Hermes endpoint
 
 The endpoint is `http://<home-assistant-address>:8099/mcp`. Configure the MCP
 client with the same token as an `Authorization: Bearer ...` header. Keep the
-six-tool allowlist in `hermes-config.example.yaml`.
+thirteen-tool allowlist in `hermes-config.example.yaml`.
 
 The same listener exposes `/api/v1` for the Household Budget custom integration.
 It uses the same bearer token and Host allowlist. The API is intentionally
@@ -53,23 +61,119 @@ After confirmation records the transaction, the source file is deleted
 immediately. Its digest, metadata, AI audit record, and ledger link remain in
 SQLite for duplicate detection and accounting history.
 
-The `confirm_large_expense` flag is an advisory caller acknowledgement. It
-causes the server to reject an initial expense over $500 when absent, but it is
-not proof that a person approved the transaction.
+For MCP expenses over $500, call `prepare_expense` first and show its exact
+summary to the person. The returned token expires after ten minutes and is
+cryptographically bound to every expense field. `add_expense` rejects a missing,
+expired, tampered, or mismatched token. The Home Assistant JSON API retains its
+separate human-review flow.
+Split totals over $500 use `prepare_split_expense` and receive the same exact,
+short-lived protection across the total and every allocation.
+
+The confirmation decoder accepts the maximum token size produced by every
+valid runtime field and allocation limit. Preparation also refuses payloads
+that would exceed the bounded decoder ceiling rather than returning a token
+that cannot be committed.
+
+Confirmation is required only for the first large write. Exact retries are
+resolved through request-ID idempotency before token validation, allowing safe
+recovery from lost responses after a token expires. A changed amount,
+allocation, timestamp, or other bound field remains a conflicting request and
+is rejected without mutation.
+
+Preparation always resolves a concrete `occurred_at` value. Even when the
+caller omitted it from the prepare request, the returned timestamp must be
+passed unchanged to the committing tool. This prevents a reviewed transaction
+from crossing a day or month boundary before it is recorded.
+
+Descriptions have one shared 1,000-character limit across preparation, token
+validation, direct writes, corrections, splits, refunds, and classification.
+This prevents a prepared payload from being rejected by the committing tool
+solely because the two boundaries applied different limits.
 
 ## MCP tool surface
 
-The MCP server exposes six tools:
+The MCP server exposes thirteen tools:
 
+- `prepare_expense`
 - `add_expense`
+- `prepare_correction`
+- `correct_expense`
+- `prepare_split_expense`
+- `add_split_expense`
 - `list_spending`
 - `list_budget_categories`
+- `suggest_expense_classification`
+- `get_budget_outlook`
 - `undo_last_expense`
 - `search_transactions`
 - `refund_expense`
 
 It does not expose arbitrary SQL, filesystem, shell, deletion, or budget
 configuration tools.
+
+## Version 0.9 operations
+
+### Corrections
+
+`correct_expense` targets a stable expense `transaction_id` and accepts only
+the fields that need to change. In one immediate SQLite transaction, it creates
+a reversal linked to the original and an active replacement linked back to the
+original. It rejects refunded, already reversed, missing, and non-expense
+targets. Exact retries are idempotent; conflicting reuse of the request ID is
+rejected. No historical row is overwritten. A correction that resolves to the
+same persisted fields is rejected without creating a reversal or replacement.
+
+If the fully resolved replacement is over $500, `prepare_correction` is
+mandatory. Its signed token binds the target transaction, request ID, resolved
+member, category, amount, merchant, description, and occurrence timestamp.
+Changing an omitted or explicit field after preparation invalidates the token.
+
+Individual allocations belonging to a split expense are rejected by both
+`prepare_correction` and `correct_expense`. Version 0.9.1 deliberately fails
+closed here because replacing only one allocation would detach it from the
+split's stated total and source request. A future group-aware split correction
+requires a separately reviewed design.
+
+`undo_last_expense` also fails closed when its selected expense is a split
+allocation, whether selection occurs by member or internal entry ID. A future
+undo operation must reverse the complete split atomically and preserve its
+declared total.
+
+### Split expenses
+
+`add_split_expense` accepts a stated total plus 2 through 20 member/category
+allocations. Every amount is validated as cents and the allocations must equal
+the stated total exactly. All allocation entries share an opaque split ID and
+commit atomically, so a failed member, category, amount, or balance check writes
+nothing. Summaries count each allocation once and canonical search results carry
+the source request ID and split ID.
+
+### Classification suggestions
+
+`suggest_expense_classification` is read-only. It ranks configured aliases,
+exact prior business-name history, and low-confidence category-name matches.
+Every result includes its reason, confidence, sample count, and last-use time
+where applicable. The response explicitly requires the caller to provide an
+exact category to a later write operation.
+
+Configured aliases match complete lexical terms, preventing aliases embedded
+inside larger words from producing false positives. Merchant history counts a
+split group only once per category, so allocating one purchase across multiple
+members does not inflate its classification evidence.
+
+### Budget outlook
+
+`get_budget_outlook` calculates spending pace, daily rate, month-end projection,
+the prior month's spending through the comparable day, pace change, projected
+remaining funds, and categories projected to exceed budget. It uses integer
+cents and the configured household timezone. Hermes should present these
+server-calculated results rather than recomputing them from conversational
+memory.
+
+Every `as_of` ledger query requires both the transaction occurrence time and
+server recording time to be at or before the cutoff. Consequently, a
+correction recorded later cannot retroactively add its replacement to an
+earlier outlook while its balancing reversal remains outside that outlook.
 
 ## Transaction search and refunds
 
@@ -227,11 +331,10 @@ work. Queries, limits, identifiers, and cursors are bounded; malformed or
 tampered cursors fail closed. Normal logs must not contain complete transaction
 histories, bearer values, or credential-bearing exception details.
 
-The server and `hermes-config.example.yaml` now define the exact six-tool
-allowlist. A live Hermes deployment still needs to adopt that allowlist.
-Resources, prompts, and parallel tool calls remain disabled. Any older Hermes
-journal material that assumes five tools is obsolete and must be updated before
-that client-side work is enabled.
+The version 0.9.1 server and `hermes-config.example.yaml` define the exact
+thirteen-tool development allowlist. A live Hermes deployment must not adopt that
+allowlist until this branch is reviewed and deployed. Resources, prompts, and
+parallel tool calls remain disabled.
 
 ### Persistence and query implementation
 
@@ -254,6 +357,24 @@ queries count each credit once and continue producing the established monthly,
 member, and parent/child category totals.
 
 ### Validation status
+
+The version 0.9.1 development suite passes 74 automated tests. P1 regression
+coverage includes large-correction preparation and mutation rejection, the
+exact $500 correction boundary, concrete single/split occurrence timestamps,
+month-boundary preservation, historical outlooks before and after a correction,
+and fail-closed split-allocation correction. Existing coverage continues to
+exercise atomic balanced splits, idempotency, classification, refunds, search,
+authentication, and the complete thirteen-tool MCP contract.
+
+P2 regression coverage verifies the shared 1,000-character prepare/commit
+description boundary, lexical alias matching, one classification-history sample
+per split source purchase and category, and no-op correction rejection without
+audit-log noise.
+
+Final hardening coverage includes maximum-size 20-allocation confirmation
+round trips, fail-closed split undo by member and entry ID, exact large expense
+and split retries with missing or expired tokens, and conflicting tokenless
+retry rejection.
 
 The 0.8.0 source delivery passed 53 automated tests plus Python, JavaScript,
 JSON, lockfile, requirements-export, archive, and Git whitespace checks. The
@@ -280,7 +401,8 @@ cleanup procedure.
 
 ### Delivery status and operational boundary
 
-The planned source-delivery workflow is complete: the implementation was
+The following delivery record applies to version 0.8.0. Version 0.9.1 remains on
+its development branch. The 0.8 source-delivery workflow is complete: it was
 reviewed on a feature branch, validated, pushed, and merged to `main` through
 pull request #3. That source delivery did not itself deploy or restart the live
 Home Assistant app, alter Hermes configuration, rotate credentials, or perform

@@ -13,9 +13,11 @@ after installation and is not stored in this repository.
   whichever page is already visible.
 - The ledger stores money as integer cents, rejects duplicate request IDs with
   conflicting data, and uses audit-preserving reversals for undo.
-- The Home Assistant app exposes six authenticated Streamable HTTP MCP tools.
-- Members, categories, subcategories, monthly limits, timezone, allowed hosts,
-  and the API token are Home Assistant app options.
+- The development release exposes thirteen authenticated Streamable HTTP MCP
+  tools, including safe correction, atomic splits, classification suggestions,
+  and server-calculated budget outlooks.
+- Members, categories, subcategories, classification aliases, monthly limits,
+  timezone, allowed hosts, and the API token are Home Assistant app options.
 - The app publishes read-only current-month totals through Home Assistant's
   internal MQTT service for the E1001 budget-only display.
 - Version 0.7 adds an authenticated JSON API, private receipt drafts, numeric
@@ -31,6 +33,10 @@ replace them in the app's Home Assistant **Configuration** tab.
 - A subcategory sets `parent` to the exact top-level category name and leaves
   its own `monthly_budget` blank.
 - Category paths and member names must be unique, ignoring capitalization.
+- Optional classification aliases map household merchant terms to exact
+  categories. They match lexical boundaries, only influence read-only
+  suggestions, and never auto-post. Historical evidence counts one source
+  purchase per category even when a split has repeated allocations.
 - When a month is first queried, its limits are snapshotted. Later default
   changes therefore do not rewrite historical months.
 - Removing a configured member or category prevents new expenses under that
@@ -53,9 +59,16 @@ The app serves Streamable HTTP on port 8099 and persists its database at
 `/data/budget.db`. Every request requires a dedicated bearer token and an
 allowed HTTP Host value. It exposes only:
 
+- `prepare_expense`
 - `add_expense`
+- `prepare_correction`
+- `correct_expense`
+- `prepare_split_expense`
+- `add_split_expense`
 - `list_spending`
 - `list_budget_categories`
+- `suggest_expense_classification`
+- `get_budget_outlook`
 - `undo_last_expense`
 - `search_transactions`
 - `refund_expense`
@@ -63,9 +76,29 @@ allowed HTTP Host value. It exposes only:
 It exposes no arbitrary SQL, filesystem, shell, deletion, or budget-mutation
 tool. Transaction search is bounded and cursor-paginated. Refunds may be linked
 to a verified expense or explicitly recorded as unlinked when no original can
-be found. The first call for an expense over $500 is rejected until the caller
-sets `confirm_large_expense=true`. This is an advisory client-policy safeguard;
-the server does not independently verify that a person approved the expense.
+be found. Expenses over $500 require `prepare_expense` followed by
+`add_expense` with the resulting short-lived signed token. The token is bound
+to the exact request ID, amount, member, category, merchant, description, and
+timestamp; changing any value invalidates it.
+Split totals over $500 use the equivalent `prepare_split_expense` flow.
+When a timestamp is omitted during preparation, the server returns a concrete
+timestamp that must be passed unchanged to the committing tool.
+
+`correct_expense` atomically records a linked reversal and replacement, never
+an in-place edit. Corrections whose resolved replacement exceeds $500 require
+an exact token from `prepare_correction`. Individual split allocations cannot
+be corrected or undone because doing so would break split reconciliation.
+No-op corrections are rejected without adding reversal records.
+`add_split_expense` records all allocations or none and requires their amounts
+to equal the stated total. Classification and outlook tools are read-only; a
+category suggestion never authorizes a ledger write.
+
+See the [Household Budget MCP 0.9.1 reference](docs/household-budget-mcp-0.9.1.md)
+for the complete command, parameter, confirmation, retry, and error contract.
+
+Large-write confirmation applies to the first mutation. Once an exact request
+ID and payload have committed, a retry returns the existing result even if the
+short-lived token is missing or expired; conflicting reuse still fails closed.
 
 The app also consumes Home Assistant's internal `mqtt` service and publishes
 retained discovery/state messages for total spent, total remaining, and each
@@ -78,16 +111,16 @@ are never stored in this repository or the app options.
 2. Open the three-dot menu, choose **Repositories**, and add
    `https://github.com/BTEngineer/budget-display`.
 3. Refresh the store, open **Household Budget MCP**, and install it.
-4. In **Configuration**, replace the generic members and categories, set the
-   timezone, and add the LAN `host:port` used by the MCP client to
-   `allowed_hosts`.
+4. In **Configuration**, replace the generic members and categories, optionally
+   define classification aliases, set the timezone, and add the LAN `host:port`
+   used by the MCP client to `allowed_hosts`.
 5. Set `api_token` to a unique random value of at least 32 characters. Do not
    reuse a Home Assistant token or another password.
 6. Start the app and confirm its log says it is listening on port 8099.
 
 Merge `hermes-config.example.yaml` into the MCP client's configuration, using
 the same token via the `BUDGET_MCP_TOKEN` environment variable. The example
-keeps an explicit six-tool allowlist and disables resources, prompts, and
+keeps an explicit thirteen-tool allowlist and disables resources, prompts, and
 parallel calls.
 
 ## Local development

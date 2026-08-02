@@ -28,7 +28,7 @@ class BudgetMCPServerTests(unittest.TestCase):
 
         return asyncio.run(invoke())
 
-    def test_exposes_only_the_six_approved_tools(self) -> None:
+    def test_exposes_only_the_thirteen_approved_tools(self) -> None:
         async def list_tools() -> dict[str, dict[str, object]]:
             async with Client(self.server) as client:
                 result = await client.list_tools()
@@ -39,8 +39,15 @@ class BudgetMCPServerTests(unittest.TestCase):
             set(tools),
             {
                 "add_expense",
+                "prepare_expense",
+                "prepare_correction",
+                "correct_expense",
+                "prepare_split_expense",
+                "add_split_expense",
                 "list_spending",
                 "list_budget_categories",
+                "suggest_expense_classification",
+                "get_budget_outlook",
                 "undo_last_expense",
                 "search_transactions",
                 "refund_expense",
@@ -74,7 +81,7 @@ class BudgetMCPServerTests(unittest.TestCase):
         self.assertEqual(summary.structured_content["spent_cents"], 800)
         self.assertEqual(summary.structured_content["budget_cents"], 180000)
 
-    def test_large_expense_requires_caller_acknowledgement(self) -> None:
+    def test_large_expense_requires_exact_confirmation_token(self) -> None:
         arguments = {
             "request_id": "telegram-mcp-2",
             "member": "Member 1",
@@ -84,14 +91,290 @@ class BudgetMCPServerTests(unittest.TestCase):
         }
         rejected = self.call("add_expense", arguments)
         self.assertTrue(rejected.is_error)
-        self.assertIn("caller policy must acknowledge", rejected.content[0].text)
+        self.assertIn("call prepare_expense", rejected.content[0].text)
         self.assertEqual(self.ledger.list_spending(month="2026-08")["spent_cents"], 0)
 
-        accepted = self.call(
+        boolean_only = self.call(
             "add_expense", {**arguments, "confirm_large_expense": True}
         )
+        self.assertTrue(boolean_only.is_error)
+        prepared = self.call("prepare_expense", arguments)
+        self.assertFalse(prepared.is_error)
+        token = prepared.structured_content["confirmation_token"]
+        changed = self.call(
+            "add_expense",
+            {**arguments, "amount": "601.00", "confirmation_token": token},
+        )
+        self.assertTrue(changed.is_error)
+        self.assertIn("does not match", changed.content[0].text)
+        accepted = self.call("add_expense", {**arguments, "confirmation_token": token})
         self.assertFalse(accepted.is_error)
         self.assertEqual(accepted.structured_content["amount_cents"], 60000)
+
+    def test_prepare_and_commit_share_the_description_limit(self) -> None:
+        arguments = {
+            "request_id": "description-limit",
+            "member": "Member 1",
+            "category": "Everyday",
+            "amount": "600.00",
+            "description": "x" * 1000,
+            "occurred_at": "2026-08-02T09:00:00-04:00",
+        }
+        prepared = self.call("prepare_expense", arguments)
+        self.assertFalse(prepared.is_error)
+        committed = self.call(
+            "add_expense",
+            {
+                **arguments,
+                "confirmation_token": prepared.structured_content["confirmation_token"],
+            },
+        )
+        self.assertFalse(committed.is_error)
+        self.assertEqual(len(committed.structured_content["transaction"]["description"]), 1000)
+
+        too_long = {**arguments, "request_id": "description-too-long", "description": "x" * 1001}
+        self.assertTrue(self.call("prepare_expense", too_long).is_error)
+        self.assertTrue(self.call("add_expense", too_long).is_error)
+
+    def test_new_write_and_read_tools_round_trip_through_mcp(self) -> None:
+        original = self.call(
+            "add_expense",
+            {
+                "request_id": "new-tools-original",
+                "member": "Member 1",
+                "category": "Everyday",
+                "amount": "10.00",
+                "business_name": "Corner Store",
+                "occurred_at": "2026-08-01T09:00:00-04:00",
+            },
+        )
+        corrected = self.call(
+            "correct_expense",
+            {
+                "request_id": "new-tools-correction",
+                "transaction_id": original.structured_content["transaction"]["transaction_id"],
+                "amount": "12.00",
+            },
+        )
+        self.assertFalse(corrected.is_error)
+        self.assertEqual(corrected.structured_content["replacement"]["amount"], "12.00")
+        split = self.call(
+            "add_split_expense",
+            {
+                "request_id": "new-tools-split",
+                "total_amount": "8.00",
+                "allocations": [
+                    {"member": "Member 1", "category": "Everyday", "amount": "3.00"},
+                    {"member": "Member 2", "category": "Occasional", "amount": "5.00"},
+                ],
+                "occurred_at": "2026-08-02T09:00:00-04:00",
+            },
+        )
+        self.assertFalse(split.is_error)
+        self.assertEqual(len(split.structured_content["allocations"]), 2)
+        suggested = self.call(
+            "suggest_expense_classification", {"business_name": "Corner Store"}
+        )
+        self.assertFalse(suggested.is_error)
+        self.assertEqual(suggested.structured_content["suggestions"][0]["category"], "Everyday")
+        outlook = self.call(
+            "get_budget_outlook",
+            {"month": "2026-08", "as_of": "2026-08-10T12:00:00-04:00"},
+        )
+        self.assertFalse(outlook.is_error)
+        self.assertEqual(outlook.structured_content["spent_cents"], 2000)
+
+    def test_large_split_requires_exact_confirmation_token(self) -> None:
+        arguments = {
+            "request_id": "large-split",
+            "total_amount": "600.00",
+            "allocations": [
+                {"member": "Member 1", "category": "Everyday", "amount": "300.00"},
+                {"member": "Member 2", "category": "Occasional", "amount": "300.00"},
+            ],
+        }
+        rejected = self.call("add_split_expense", arguments)
+        self.assertTrue(rejected.is_error)
+        prepared = self.call("prepare_split_expense", arguments)
+        self.assertFalse(prepared.is_error)
+        occurred_at = prepared.structured_content["split_expense"]["occurred_at"]
+        missing_bound_time = self.call(
+            "add_split_expense",
+            {
+                **arguments,
+                "confirmation_token": prepared.structured_content["confirmation_token"],
+            },
+        )
+        self.assertTrue(missing_bound_time.is_error)
+        self.assertIn("occurred_at", missing_bound_time.content[0].text)
+        accepted = self.call(
+            "add_split_expense",
+            {
+                **arguments,
+                "occurred_at": occurred_at,
+                "confirmation_token": prepared.structured_content["confirmation_token"],
+            },
+        )
+        self.assertFalse(accepted.is_error)
+        self.assertEqual(accepted.structured_content["total_amount"], "600.00")
+
+    def test_large_write_retries_are_idempotent_without_a_live_token(self) -> None:
+        expense_arguments = {
+            "request_id": "large-expense-retry",
+            "member": "Member 1",
+            "category": "Everyday",
+            "amount": "600.00",
+            "occurred_at": "2026-08-03T09:00:00-04:00",
+        }
+        expense_prepared = self.call("prepare_expense", expense_arguments)
+        expense_first = self.call(
+            "add_expense",
+            {
+                **expense_arguments,
+                "confirmation_token": expense_prepared.structured_content[
+                    "confirmation_token"
+                ],
+            },
+        )
+        self.assertFalse(expense_first.is_error)
+        expense_retry = self.call("add_expense", expense_arguments)
+        self.assertFalse(expense_retry.is_error)
+        self.assertTrue(expense_retry.structured_content["duplicate"])
+
+        with self.ledger._connection() as connection:
+            expired_token = self.ledger._encode_confirmation(
+                connection, {"expires_at": 0}
+            )
+        expired_expense_retry = self.call(
+            "add_expense",
+            {**expense_arguments, "confirmation_token": expired_token},
+        )
+        self.assertFalse(expired_expense_retry.is_error)
+        self.assertTrue(expired_expense_retry.structured_content["duplicate"])
+        conflicting_expense = self.call(
+            "add_expense", {**expense_arguments, "amount": "601.00"}
+        )
+        self.assertTrue(conflicting_expense.is_error)
+        self.assertIn("different ledger operation", conflicting_expense.content[0].text)
+
+        split_arguments = {
+            "request_id": "large-split-retry",
+            "total_amount": "600.00",
+            "allocations": [
+                {"member": "Member 1", "category": "Everyday", "amount": "300.00"},
+                {"member": "Member 2", "category": "Occasional", "amount": "300.00"},
+            ],
+            "occurred_at": "2026-08-04T09:00:00-04:00",
+        }
+        split_prepared = self.call("prepare_split_expense", split_arguments)
+        split_first = self.call(
+            "add_split_expense",
+            {
+                **split_arguments,
+                "confirmation_token": split_prepared.structured_content[
+                    "confirmation_token"
+                ],
+            },
+        )
+        self.assertFalse(split_first.is_error)
+        split_retry = self.call("add_split_expense", split_arguments)
+        self.assertFalse(split_retry.is_error)
+        self.assertTrue(split_retry.structured_content["duplicate"])
+        expired_split_retry = self.call(
+            "add_split_expense",
+            {**split_arguments, "confirmation_token": expired_token},
+        )
+        self.assertFalse(expired_split_retry.is_error)
+        self.assertTrue(expired_split_retry.structured_content["duplicate"])
+        conflicting_split = self.call(
+            "add_split_expense",
+            {
+                **split_arguments,
+                "allocations": [
+                    {"member": "Member 1", "category": "Everyday", "amount": "299.00"},
+                    {"member": "Member 2", "category": "Occasional", "amount": "301.00"},
+                ],
+            },
+        )
+        self.assertTrue(conflicting_split.is_error)
+        self.assertIn("different ledger operation", conflicting_split.content[0].text)
+
+    def test_large_correction_requires_exact_confirmation_token(self) -> None:
+        original = self.call(
+            "add_expense",
+            {
+                "request_id": "large-correction-original",
+                "member": "Member 1",
+                "category": "Everyday",
+                "amount": "1.00",
+                "occurred_at": "2026-08-01T09:00:00-04:00",
+            },
+        )
+        transaction_id = original.structured_content["transaction"]["transaction_id"]
+        arguments = {
+            "request_id": "large-correction",
+            "transaction_id": transaction_id,
+            "amount": "600.00",
+        }
+        rejected = self.call("correct_expense", arguments)
+        self.assertTrue(rejected.is_error)
+        self.assertIn("prepare_correction", rejected.content[0].text)
+        self.assertEqual(self.ledger.list_spending(month="2026-08")["spent_cents"], 100)
+
+        prepared = self.call("prepare_correction", arguments)
+        self.assertFalse(prepared.is_error)
+        token = prepared.structured_content["confirmation_token"]
+        changed = self.call(
+            "correct_expense",
+            {**arguments, "amount": "601.00", "confirmation_token": token},
+        )
+        self.assertTrue(changed.is_error)
+        self.assertIn("does not match", changed.content[0].text)
+        accepted = self.call(
+            "correct_expense", {**arguments, "confirmation_token": token}
+        )
+        self.assertFalse(accepted.is_error)
+        self.assertEqual(accepted.structured_content["replacement"]["amount"], "600.00")
+
+    def test_correction_threshold_boundary_is_exact(self) -> None:
+        first = self.call(
+            "add_expense",
+            {
+                "request_id": "correction-boundary-first",
+                "member": "Member 1",
+                "category": "Everyday",
+                "amount": "1.00",
+            },
+        )
+        exactly_500 = self.call(
+            "correct_expense",
+            {
+                "request_id": "correction-exactly-500",
+                "transaction_id": first.structured_content["transaction"]["transaction_id"],
+                "amount": "500.00",
+            },
+        )
+        self.assertFalse(exactly_500.is_error)
+
+        second = self.call(
+            "add_expense",
+            {
+                "request_id": "correction-boundary-second",
+                "member": "Member 2",
+                "category": "Occasional",
+                "amount": "1.00",
+            },
+        )
+        over_500 = self.call(
+            "correct_expense",
+            {
+                "request_id": "correction-over-500",
+                "transaction_id": second.structured_content["transaction"]["transaction_id"],
+                "amount": "500.01",
+            },
+        )
+        self.assertTrue(over_500.is_error)
+        self.assertIn("prepare_correction", over_500.content[0].text)
 
     def test_ambiguous_parent_category_fails_closed(self) -> None:
         result = self.call(

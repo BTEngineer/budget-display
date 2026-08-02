@@ -183,6 +183,9 @@ class BudgetMCPHTTPTests(unittest.TestCase):
                             "monthly_budget": "",
                         },
                     ],
+                    "classification_aliases": [
+                        {"term": "local market", "category": "Primary/Detail"}
+                    ],
                 }
             ),
             encoding="utf-8",
@@ -197,6 +200,53 @@ class BudgetMCPHTTPTests(unittest.TestCase):
             config.categories,
             (("Primary", None, 25000), ("Detail", "Primary", None)),
         )
+        self.assertEqual(
+            config.classification_aliases,
+            (("local market", "Primary/Detail"),),
+        )
+
+    def test_classification_alias_requires_a_configured_category(self) -> None:
+        options = Path(self.temporary_directory.name) / "options.json"
+        options.write_text(
+            json.dumps(
+                {
+                    "api_token": TOKEN,
+                    "allowed_hosts": ["testserver"],
+                    "members": ["Alpha"],
+                    "categories": [
+                        {"name": "Primary", "parent": "", "monthly_budget": "10.00"}
+                    ],
+                    "classification_aliases": [
+                        {"term": "shop", "category": "Missing"}
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BudgetValidationError, "unknown category"):
+            load_runtime_config(options)
+
+    def test_classification_alias_uniqueness_uses_normalized_whitespace(self) -> None:
+        options = Path(self.temporary_directory.name) / "options.json"
+        options.write_text(
+            json.dumps(
+                {
+                    "api_token": TOKEN,
+                    "allowed_hosts": ["testserver"],
+                    "members": ["Alpha"],
+                    "categories": [
+                        {"name": "Primary", "parent": "", "monthly_budget": "10.00"}
+                    ],
+                    "classification_aliases": [
+                        {"term": "local market", "category": "Primary"},
+                        {"term": "local   market", "category": "Primary"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BudgetValidationError, "must be unique"):
+            load_runtime_config(options)
 
     def test_unknown_category_parent_fails_closed(self) -> None:
         options = Path(self.temporary_directory.name) / "options.json"
