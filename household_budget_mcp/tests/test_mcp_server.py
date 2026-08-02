@@ -28,15 +28,30 @@ class BudgetMCPServerTests(unittest.TestCase):
 
         return asyncio.run(invoke())
 
-    def test_exposes_only_the_four_approved_tools(self) -> None:
-        async def list_tools() -> set[str]:
+    def test_exposes_only_the_six_approved_tools(self) -> None:
+        async def list_tools() -> dict[str, dict[str, object]]:
             async with Client(self.server) as client:
                 result = await client.list_tools()
-                return {tool.name for tool in result.tools}
+                return {tool.name: tool.input_schema for tool in result.tools}
 
+        tools = asyncio.run(list_tools())
         self.assertEqual(
-            asyncio.run(list_tools()),
-            {"add_expense", "list_spending", "list_budget_categories", "undo_last_expense"},
+            set(tools),
+            {
+                "add_expense",
+                "list_spending",
+                "list_budget_categories",
+                "undo_last_expense",
+                "search_transactions",
+                "refund_expense",
+            },
+        )
+        self.assertTrue(
+            {"category", "business_name", "cursor", "operation_type"}
+            <= set(tools["search_transactions"]["properties"])
+        )
+        self.assertEqual(
+            set(tools["refund_expense"]["required"]), {"request_id", "amount"}
         )
 
     def test_add_and_list_round_trip_through_mcp(self) -> None:
@@ -109,6 +124,72 @@ class BudgetMCPServerTests(unittest.TestCase):
         self.assertFalse(undone.is_error)
         self.assertEqual(undone.structured_content["amount_cents"], -4000)
         self.assertIsNotNone(undone.structured_content["reverses_entry_id"])
+
+    def test_search_and_linked_refund_round_trip_through_mcp(self) -> None:
+        added = self.call(
+            "add_expense",
+            {
+                "request_id": "telegram-mcp-refund-original",
+                "member": "Member 1",
+                "category": "Everyday",
+                "amount": "30.00",
+                "business_name": "Corner Market",
+                "description": "Supplies",
+                "occurred_at": "2026-08-04T09:00:00-04:00",
+            },
+        )
+        transaction_id = added.structured_content["transaction"]["transaction_id"]
+        searched = self.call(
+            "search_transactions",
+            {"business_name": "market", "operation_type": "expense"},
+        )
+        self.assertFalse(searched.is_error)
+        self.assertEqual(searched.structured_content["count"], 1)
+        self.assertEqual(
+            searched.structured_content["transactions"][0]["transaction_id"],
+            transaction_id,
+        )
+
+        refunded = self.call(
+            "refund_expense",
+            {
+                "request_id": "telegram-mcp-refund",
+                "expense_id": transaction_id,
+                "amount": "12.50",
+                "description": "Returned item",
+                "occurred_at": "2026-08-05T09:00:00-04:00",
+            },
+        )
+        self.assertFalse(refunded.is_error)
+        canonical = refunded.structured_content["transaction"]
+        self.assertEqual(canonical["operation_type"], "refund")
+        self.assertEqual(canonical["refund_link_status"], "linked")
+        self.assertEqual(canonical["refund_of_transaction_id"], transaction_id)
+        self.assertEqual(self.ledger.list_spending(month="2026-08")["spent_cents"], 1750)
+
+    def test_unlinked_refund_requires_member_and_category(self) -> None:
+        rejected = self.call(
+            "refund_expense",
+            {"request_id": "unlinked-missing", "amount": "5.00"},
+        )
+        self.assertTrue(rejected.is_error)
+        self.assertIn("member is required", rejected.content[0].text)
+
+        accepted = self.call(
+            "refund_expense",
+            {
+                "request_id": "unlinked-complete",
+                "amount": "5.00",
+                "member": "Member 2",
+                "category": "Occasional",
+                "business_name": "Online Store",
+            },
+        )
+        self.assertFalse(accepted.is_error)
+        self.assertEqual(
+            accepted.structured_content["transaction"]["refund_link_status"],
+            "unlinked",
+        )
 
 
 if __name__ == "__main__":

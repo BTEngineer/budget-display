@@ -1,0 +1,22 @@
+{
+  "title": "Household Budget",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Household Budget",
+        "description": "Connect Home Assistant to the authenticated budget app and choose the existing OpenAI AI Task entity used for receipt extraction.",
+        "data": {
+          "base_url": "Budget app URL",
+          "api_token": "Budget app API token",
+          "ai_task_entity": "OpenAI AI Task entity ID"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to authenticate to the Household Budget app."
+    },
+    "abort": {
+      "single_instance_allowed": "Household Budget is already configured."
+    }
+  }
+}

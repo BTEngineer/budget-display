@@ -1,6 +1,6 @@
 name: "Household Budget MCP"
-description: "Private household budget ledger and authenticated MCP endpoint"
-version: "0.6.0"
+description: "Private household budget ledger, HA dashboard API, and authenticated MCP endpoint"
+version: "0.8.0"
 slug: "household_budget_mcp"
 url: "https://github.com/BTEngineer/budget-display"
 init: false

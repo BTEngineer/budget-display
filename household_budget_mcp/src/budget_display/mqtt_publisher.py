@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import threading
+import hashlib
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -125,6 +127,21 @@ class BudgetMQTTPublisher:
             cents=int(summary["spent_cents"]),
         )
         remaining = summary["remaining_cents"]
+        budget = summary["budget_cents"]
+        if budget is not None:
+            self._publish_money_sensor(
+                object_id="budget_month",
+                display_name="Budget this month",
+                cents=int(budget),
+            )
+            percent = round(int(summary["spent_cents"]) * 100 / int(budget), 1) if int(budget) else 0
+            self._publish_number_sensor(
+                object_id="percent_used_month",
+                display_name="Budget used this month",
+                value=f"{percent:.1f}",
+                unit="%",
+                state_class="measurement",
+            )
         if remaining is not None:
             self._publish_money_sensor(
                 object_id="remaining_month",
@@ -139,6 +156,37 @@ class BudgetMQTTPublisher:
                 cents=int(by_member.get(member, 0)),
             )
         category_rows = summary["category_rows"]
+        for row in category_rows:
+            if row["parent"] is not None:
+                continue
+            category_key = self._category_key(str(row["name"]))
+            spent_cents = int(row["spent_cents"])
+            budget_cents = row["budget_cents"]
+            self._publish_money_sensor(
+                object_id=f"category_{category_key}_spent_month",
+                display_name=f"{row['name']} spent this month",
+                cents=spent_cents,
+            )
+            if budget_cents is not None:
+                numeric_budget = int(budget_cents)
+                self._publish_money_sensor(
+                    object_id=f"category_{category_key}_budget_month",
+                    display_name=f"{row['name']} budget this month",
+                    cents=numeric_budget,
+                )
+                self._publish_money_sensor(
+                    object_id=f"category_{category_key}_remaining_month",
+                    display_name=f"{row['name']} remaining this month",
+                    cents=numeric_budget - spent_cents,
+                )
+                percent = round(spent_cents * 100 / numeric_budget, 1) if numeric_budget else 0
+                self._publish_number_sensor(
+                    object_id=f"category_{category_key}_percent_month",
+                    display_name=f"{row['name']} budget used this month",
+                    value=f"{percent:.1f}",
+                    unit="%",
+                    state_class="measurement",
+                )
         if len(category_rows) > MAX_DISPLAY_CATEGORY_ROWS:
             LOGGER.warning(
                 "Only the first %s budget categories fit on the E1001 display",
@@ -169,9 +217,40 @@ class BudgetMQTTPublisher:
                 display_name=f"Category row {index} this month",
                 value=payload,
             )
+        self._publish_text_sensor(
+            object_id="last_update",
+            display_name="Last budget update",
+            value=datetime.now(self.ledger.household_timezone).isoformat(timespec="seconds"),
+            device_class="timestamp",
+        )
+
+    @staticmethod
+    def _category_key(name: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "_", name.casefold()).strip("_") or "category"
+        digest = hashlib.sha256(name.casefold().encode("utf-8")).hexdigest()[:8]
+        return f"{slug[:40]}_{digest}"
 
     def _publish_money_sensor(
         self, *, object_id: str, display_name: str, cents: int
+    ) -> None:
+        self._publish_number_sensor(
+            object_id=object_id,
+            display_name=display_name,
+            value=f"{cents / 100:.2f}",
+            unit="$",
+            device_class="monetary",
+            state_class="measurement",
+        )
+
+    def _publish_number_sensor(
+        self,
+        *,
+        object_id: str,
+        display_name: str,
+        value: str,
+        unit: str,
+        device_class: str | None = None,
+        state_class: str | None = None,
     ) -> None:
         unique_id = f"household_budget_{object_id}"
         state_topic = f"{STATE_PREFIX}/state/{object_id}"
@@ -183,9 +262,7 @@ class BudgetMQTTPublisher:
             "availability_topic": f"{STATE_PREFIX}/status",
             "payload_available": "online",
             "payload_not_available": "offline",
-            "device_class": "monetary",
-            "state_class": "measurement",
-            "unit_of_measurement": "$",
+            "unit_of_measurement": unit,
             "device": {
                 "identifiers": [DEVICE_ID],
                 "name": "Household Budget",
@@ -193,6 +270,10 @@ class BudgetMQTTPublisher:
                 "model": "Home Assistant Budget MCP",
             },
         }
+        if device_class:
+            discovery["device_class"] = device_class
+        if state_class:
+            discovery["state_class"] = state_class
         self.client.publish(
             f"{DISCOVERY_PREFIX}/sensor/{unique_id}/config",
             json.dumps(discovery, separators=(",", ":"), sort_keys=True),
@@ -200,11 +281,16 @@ class BudgetMQTTPublisher:
             retain=True,
         )
         self.client.publish(
-            state_topic, f"{cents / 100:.2f}", qos=1, retain=True
+            state_topic, value, qos=1, retain=True
         )
 
     def _publish_text_sensor(
-        self, *, object_id: str, display_name: str, value: str
+        self,
+        *,
+        object_id: str,
+        display_name: str,
+        value: str,
+        device_class: str | None = None,
     ) -> None:
         unique_id = f"household_budget_{object_id}"
         state_topic = f"{STATE_PREFIX}/state/{object_id}"
@@ -223,6 +309,8 @@ class BudgetMQTTPublisher:
                 "model": "Home Assistant Budget MCP",
             },
         }
+        if device_class:
+            discovery["device_class"] = device_class
         self.client.publish(
             f"{DISCOVERY_PREFIX}/sensor/{unique_id}/config",
             json.dumps(discovery, separators=(",", ":"), sort_keys=True),

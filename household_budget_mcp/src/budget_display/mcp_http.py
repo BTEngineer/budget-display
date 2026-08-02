@@ -24,6 +24,8 @@ from .ledger import (
 )
 from .mcp_server import create_server
 from .mqtt_publisher import BudgetMQTTPublisher, MQTTConfig
+from .budget_api import BudgetJSONAPI
+from .receipt_store import ReceiptStore
 
 
 @dataclass(frozen=True)
@@ -204,14 +206,14 @@ def load_runtime_config(
 
 def create_http_app(config: HTTPRuntimeConfig):
     """Create a bearer-protected, stateless Streamable HTTP MCP app."""
-    server = create_server(
-        BudgetLedger(
-            config.database,
-            household_timezone=config.household_timezone,
-            members=config.members,
-            categories=config.categories,
-        )
+    ledger = BudgetLedger(
+        config.database,
+        household_timezone=config.household_timezone,
+        members=config.members,
+        categories=config.categories,
     )
+    ledger.initialize()
+    server = create_server(ledger)
     transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=list(config.allowed_hosts),
@@ -224,8 +226,14 @@ def create_http_app(config: HTTPRuntimeConfig):
         transport_security=transport_security,
         host=config.bind_host,
     )
+    combined_app = BudgetJSONAPI(
+        mcp_app,
+        ledger=ledger,
+        receipts=ReceiptStore(config.database.parent / "receipts"),
+        allowed_hosts=config.allowed_hosts,
+    )
     protected_app = HTTPRequireAuthMiddleware(
-        mcp_app, required_scopes=["budget"], resource_metadata_url=None
+        combined_app, required_scopes=["budget"], resource_metadata_url=None
     )
     return AuthenticationMiddleware(
         protected_app,

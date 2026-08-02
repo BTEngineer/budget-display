@@ -22,6 +22,7 @@ def _parser() -> argparse.ArgumentParser:
     add.add_argument("--member", required=True)
     add.add_argument("--category", required=True)
     add.add_argument("--amount", required=True)
+    add.add_argument("--business-name", default="")
     add.add_argument("--description", default="")
     add.add_argument("--occurred-at")
 
@@ -58,6 +59,7 @@ def main() -> int:
                 member=args.member,
                 category=args.category,
                 amount=args.amount,
+                business_name=args.business_name,
                 description=args.description,
                 occurred_at=args.occurred_at,
             )

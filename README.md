@@ -7,15 +7,20 @@ after installation and is not stored in this repository.
 
 ## Current status
 
-- The E1001 template has a single Budget page and expects future read-only Home
-  Assistant budget sensors.
+- The E1001 template has a Home page plus a Budget page. Pressing the green
+  button toggles between them, while the side buttons refresh the current page.
+- The selected page persists through deep sleep, so scheduled wakes refresh
+  whichever page is already visible.
 - The ledger stores money as integer cents, rejects duplicate request IDs with
   conflicting data, and uses audit-preserving reversals for undo.
-- The Home Assistant app exposes four authenticated Streamable HTTP MCP tools.
+- The Home Assistant app exposes six authenticated Streamable HTTP MCP tools.
 - Members, categories, subcategories, monthly limits, timezone, allowed hosts,
   and the API token are Home Assistant app options.
 - The app publishes read-only current-month totals through Home Assistant's
   internal MQTT service for the E1001 budget-only display.
+- Version 0.7 adds an authenticated JSON API, private receipt drafts, numeric
+  dashboard sensors, and a phone-first Home Assistant custom card. Receipt AI
+  results remain drafts until a person explicitly confirms them.
 
 ## Configurable budget structure
 
@@ -52,11 +57,15 @@ allowed HTTP Host value. It exposes only:
 - `list_spending`
 - `list_budget_categories`
 - `undo_last_expense`
+- `search_transactions`
+- `refund_expense`
 
 It exposes no arbitrary SQL, filesystem, shell, deletion, or budget-mutation
-tool. The first call for an expense over $500 is rejected until the caller sets
-`confirm_large_expense=true`. This is an advisory client-policy safeguard; the
-server does not independently verify that a person approved the expense.
+tool. Transaction search is bounded and cursor-paginated. Refunds may be linked
+to a verified expense or explicitly recorded as unlinked when no original can
+be found. The first call for an expense over $500 is rejected until the caller
+sets `confirm_large_expense=true`. This is an advisory client-policy safeguard;
+the server does not independently verify that a person approved the expense.
 
 The app also consumes Home Assistant's internal `mqtt` service and publishes
 retained discovery/state messages for total spent, total remaining, and each
@@ -78,7 +87,7 @@ are never stored in this repository or the app options.
 
 Merge `hermes-config.example.yaml` into the MCP client's configuration, using
 the same token via the `BUDGET_MCP_TOKEN` environment variable. The example
-keeps an explicit four-tool allowlist and disables resources, prompts, and
+keeps an explicit six-tool allowlist and disables resources, prompts, and
 parallel calls.
 
 ## Local development
@@ -90,6 +99,28 @@ cd household_budget_mcp
 python -m unittest discover -s tests -v
 ```
 
+## Home Assistant phone dashboard
+
+The local implementation is under `custom_components/household_budget`. After
+review, copy that directory into Home Assistant's `/config/custom_components`,
+restart Home Assistant, and add the **Household Budget** integration. Configure
+the local app URL, its dedicated API token, and the existing OpenAI AI Task
+entity. Then register this dashboard module resource:
+
+```text
+/household_budget_static/household-budget-card.js
+```
+
+Use `home_assistant/household-budget-dashboard.preview.yaml` as the dashboard
+starting point. The custom card never receives the app token or OpenAI key.
+Receipt uploads accept JPEG, PNG, or PDF up to 12 MB, request the rear camera on
+supported phones, and always require a review screen before ledger insertion.
+After the reviewed transaction is committed, the source receipt file is deleted
+immediately; its SHA-256 digest and audit metadata remain for duplicate detection.
+The browser endpoints are restricted to authenticated Home Assistant
+administrators by default; broader household-user access should be a separate,
+explicitly reviewed change.
+
 The E1001 template expects these Home Assistant sensors, which the app creates
 through MQTT discovery:
 
@@ -100,10 +131,15 @@ through MQTT discovery:
 - `sensor.household_budget_category_1_month` through
   `sensor.household_budget_category_6_month`
 
-The checked-in ESPHome file contains placeholders only. It subscribes only to
-the budget sensors listed above. The screen shows spent and remaining totals,
-then up to six configured category rows with budget, first-member,
+The checked-in ESPHome file contains placeholders only. Its Home page shows the
+Home Assistant date and time plus the E1001 battery level. Its Budget page
+subscribes only to the budget sensors listed above and shows spent and remaining
+totals, then up to six configured category rows with budget, first-member,
 second-member, and combined spending. Child categories are indented and their
-parent row is the aggregate, so the overall total is not double-counted. It
-does not display weather, occupancy, doors, person detection, locks, or other
+parent row is the aggregate, so the overall total is not double-counted.
+
+The green button wakes the display and toggles Home/Budget exactly once. A
+second green-button press toggles back. The side buttons refresh the current
+page, and the selected page is retained across deep sleep. The Home page does
+not yet display weather, occupancy, doors, person detection, locks, or other
 home status. Keep the E1001 on USB power and awake during OTA work.
