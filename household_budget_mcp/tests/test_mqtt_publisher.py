@@ -77,7 +77,15 @@ class BudgetMQTTPublisherTests(unittest.TestCase):
             "sensor.household_budget_person_1_month",
         )
         self.assertEqual(discovery["name"], "Alpha this month")
+        self.assertEqual(discovery["device_class"], "monetary")
+        self.assertNotIn("state_class", discovery)
         self.assertNotIn("secret", json.dumps(discovery))
+        percent_discovery = json.loads(
+            messages[
+                "homeassistant/sensor/household_budget_percent_used_month/config"
+            ]
+        )
+        self.assertEqual(percent_discovery["state_class"], "measurement")
         category_key = self.publisher._category_key("Everyday")
         self.assertEqual(
             messages[f"household_budget/state/category_{category_key}_budget_month"],
