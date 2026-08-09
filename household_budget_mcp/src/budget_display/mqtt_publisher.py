@@ -239,7 +239,6 @@ class BudgetMQTTPublisher:
             value=f"{cents / 100:.2f}",
             unit="$",
             device_class="monetary",
-            state_class="measurement",
         )
 
     def _publish_number_sensor(
