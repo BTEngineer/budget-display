@@ -1,9 +1,7 @@
-# IMPLEMENTED LOCALLY - do not import into the live Home Assistant instance
-# until the custom integration and app version 0.8.0 are installed.
-#
-# This dashboard references the locally implemented Household Budget custom
-# card and numeric MQTT entities. Live entity IDs must be verified after the
-# app publishes MQTT discovery.
+# Reference structure for the live storage-mode Household Budget dashboard,
+# deployed and read back on 2026-08-02 with integration version 0.8.0.
+# Use Home Assistant's dashboard APIs for future updates rather than importing
+# this file blindly; verify live entity IDs before each deployment.
 
 title: Household Budget
 views:

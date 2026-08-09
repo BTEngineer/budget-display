@@ -18,6 +18,7 @@ options:
   api_token: ""
   allowed_hosts:
     - "homeassistant.local:8099"
+    - "9930efe6-household-budget-mcp:8099"
   household_timezone: "America/New_York"
   members:
     - "Member 1"

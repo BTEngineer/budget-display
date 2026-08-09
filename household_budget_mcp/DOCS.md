@@ -22,9 +22,11 @@ characters. Do not reuse a Home Assistant access token or another account
 password.
 
 `allowed_hosts` contains the exact `Host` headers permitted by the MCP server.
-The generic default contains the local hostname:
+The generic defaults contain the external local hostname and the app's stable
+internal Home Assistant hostname:
 
 - `homeassistant.local:8099`
+- `9930efe6-household-budget-mcp:8099`
 
 Add the LAN address used by the MCP client before connecting it. Entries use
 `host:port` format without `http://` or a path.
@@ -52,6 +54,9 @@ It uses the same bearer token and Host allowlist. The API is intentionally
 limited to configuration, summaries, recent expenses, validated expense/undo
 operations, and the receipt draft lifecycle. It exposes no SQL, shell,
 filesystem browsing, credential, or arbitrary Home Assistant operation.
+Configure the custom integration with
+`http://9930efe6-household-budget-mcp:8099` so Home Assistant uses Supervisor's
+internal app DNS rather than routing back through its LAN hostname.
 
 Receipt files are validated as JPEG, PNG, or PDF, capped at 12 MB, named by
 their SHA-256 digest, and stored privately under `/data/receipts`. AI output is

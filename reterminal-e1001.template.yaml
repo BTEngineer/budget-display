@@ -15,7 +15,7 @@ esphome:
         - lambda: |-
             const uint64_t wake_pins = esp_sleep_get_ext1_wakeup_status();
             const bool woke_from_green_button =
-                (wake_pins & (1ULL << 4)) != 0;
+                (wake_pins & (1ULL << 3)) != 0;
             if (woke_from_green_button && !id(green_wake_processed)) {
               id(show_budget_page) = !id(show_budget_page);
               id(green_wake_processed) = true;
@@ -163,21 +163,9 @@ text_sensor:
 binary_sensor:
   - platform: gpio
     id: next_button
-    name: Right Refresh Button
-    pin:
-      number: GPIO3
-      mode: INPUT_PULLUP
-      inverted: true
-      allow_other_uses: true
-    on_press:
-      then:
-        - component.update: epaper_display
-
-  - platform: gpio
-    id: refresh_button
     name: Green Page Toggle Button
     pin:
-      number: GPIO4
+      number: GPIO3
       mode: INPUT_PULLUP
       inverted: true
       allow_other_uses: true
@@ -186,7 +174,7 @@ binary_sensor:
         - lambda: |-
             const uint64_t wake_pins = esp_sleep_get_ext1_wakeup_status();
             const bool this_boot_woke_from_green_button =
-                (wake_pins & (1ULL << 4)) != 0;
+                (wake_pins & (1ULL << 3)) != 0;
             const bool duplicate_boot_press =
                 !id(boot_display_ready) &&
                 this_boot_woke_from_green_button &&
@@ -212,6 +200,20 @@ binary_sensor:
               - component.update: epaper_display
 
   - platform: gpio
+    id: refresh_button
+    name: Right Refresh Button
+    pin:
+      number: GPIO4
+      mode: INPUT_PULLUP
+      inverted: true
+      allow_other_uses: true
+    on_press:
+      then:
+        - component.update: battery_voltage
+        - component.update: battery_level
+        - component.update: epaper_display
+
+  - platform: gpio
     id: previous_button
     name: Left Refresh Button
     pin:
@@ -230,6 +232,15 @@ time:
 font:
   - file: "gfonts://Inter@400"
     id: body_font
+    size: 18
+    glyphsets: []
+    glyphs:
+      - " 0123456789"
+      - "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+      - "abcdefghijklmnopqrstuvwxyz"
+      - "$%.,!?()-/:<>"
+  - file: "gfonts://Inter@700"
+    id: bold_body_font
     size: 18
     glyphsets: []
     glyphs:
@@ -366,23 +377,32 @@ display:
 
               int y = 191 + visible_row * 31;
               const bool child = fields[0] == "1";
+              const bool has_budget = !fields[2].empty();
+              const float row_budget =
+                  has_budget ? strtof(fields[2].c_str(), nullptr) : 0.0f;
+              const float row_total = strtof(fields[5].c_str(), nullptr);
               if (child) {
                 it.printf(38, y, id(body_font), "> %s", fields[1].c_str());
               } else {
                 it.print(24, y, id(body_font), fields[1].c_str());
               }
-              if (fields[2].empty()) {
+              if (!has_budget) {
                 it.print(360, y, id(body_font), TextAlign::TOP_RIGHT, "--");
               } else {
                 it.printf(360, y, id(body_font), TextAlign::TOP_RIGHT, "$%.2f",
-                          strtof(fields[2].c_str(), nullptr));
+                          row_budget);
               }
               it.printf(495, y, id(body_font), TextAlign::TOP_RIGHT, "$%.2f",
                         strtof(fields[3].c_str(), nullptr));
               it.printf(650, y, id(body_font), TextAlign::TOP_RIGHT, "$%.2f",
                         strtof(fields[4].c_str(), nullptr));
-              it.printf(776, y, id(body_font), TextAlign::TOP_RIGHT, "$%.2f",
-                        strtof(fields[5].c_str(), nullptr));
+              if (has_budget && row_total > row_budget) {
+                it.printf(776, y, id(bold_body_font), TextAlign::TOP_RIGHT,
+                          "$%.2f", row_total);
+              } else {
+                it.printf(776, y, id(body_font), TextAlign::TOP_RIGHT, "$%.2f",
+                          row_total);
+              }
               visible_row++;
             }
 
