@@ -1,11 +1,12 @@
 # Household Budget MCP 0.9.1 Reference
 
 This document describes the authenticated Household Budget MCP tool surface in
-version 0.9.1. It covers the complete 13-tool contract implemented on the
-`codex/budget-mcp-improvements` development branch.
+version 0.9.1. It covers the complete 13-tool contract introduced and released
+in that version.
 
-Version 0.9.1 is not deployed by this document. Version 0.8.0 remains the
-published baseline until the development pull request is reviewed and merged.
+Version 0.9.2 of the app retains this version 0.9.1 command contract and adds
+only packaging/configuration follow-ups. This reference does not itself deploy
+or validate a live app or Hermes client.
 
 ## Connection
 

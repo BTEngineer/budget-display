@@ -4,7 +4,8 @@ Status: version 0.8.0 was deployed to the live Home Assistant instance on
 2026-08-02. The administrator-only **Household Budget** sidebar dashboard,
 custom integration, module resource, and live entity references were read back
 successfully. Rendered phone layout and the financial-write paths were not
-exercised during deployment.
+exercised during deployment. Version 0.8.1 is the source follow-up containing
+the reviewed connection-options and manual-entry improvements.
 
 The implementation uses an administrator-only HA browser boundary, keeps the
 budget/OpenAI credentials out of frontend code, and preserves the mandatory

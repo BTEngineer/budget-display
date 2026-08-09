@@ -135,13 +135,13 @@ python -m unittest discover -s tests -v
 
 ## Home Assistant phone dashboard
 
-The implementation is under `custom_components/household_budget`. The live
-Home Assistant instance has version 0.8.0 installed, connected to the local app
-and its existing OpenAI AI Task entity, with an administrator-only **Household
-Budget** dashboard in the sidebar. A fresh installation should copy that
-directory into Home Assistant's configuration `custom_components` directory,
-restart Home Assistant, add the integration, and register the module resource
-shown below.
+The version 0.8.1 implementation is under
+`custom_components/household_budget`. The August 2 live validation used version
+0.8.0, connected to the local app and its existing OpenAI AI Task entity, with
+an administrator-only **Household Budget** dashboard in the sidebar. A fresh
+installation should copy that directory into Home Assistant's configuration
+`custom_components` directory, restart Home Assistant, add the integration,
+and register the module resource shown below.
 
 Use `http://9930efe6-household-budget-mcp:8099` as the integration's app URL.
 The integration's **Configure** flow can update the URL, token, or AI Task
