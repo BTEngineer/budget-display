@@ -95,20 +95,41 @@ class HouseholdBudgetCard extends HTMLElement {
       return `<h2>Add an expense</h2><div class="actions"><button id="scan" class="primary"><ha-icon icon="mdi:camera-outline"></ha-icon> Scan a receipt</button><input id="receipt" class="hidden" type="file" accept="image/jpeg,image/png,application/pdf" capture="environment"><button id="manual"><ha-icon icon="mdi:pencil-outline"></ha-icon> Enter manually</button></div>`;
     }
     const draft = this.draft || {};
+    if (this.reviewing && !this.draftId) return this._manualReviewView(draft);
     if (!this.lastMember) this.lastMember = localStorage.getItem("household-budget-last-member") || "";
-    const today = new Date().toISOString().slice(0,10);
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
     const categories = (this.data?.categories || []).filter((x) => x.accepts_expenses).map((x) => ({ value:x.parent ? `${x.parent}/${x.name}` : x.name, label:x.parent ? `${x.parent} / ${x.name}` : x.name }));
     const options = (values, selected) => values.map((x) => `<option value="${this._escape(x.value ?? x)}" ${(x.value ?? x) === selected ? "selected" : ""}>${this._escape(x.label ?? x)}</option>`).join("");
     const preview = this.previewUrl && this.previewType?.startsWith("image/") ? `<img class="receipt-preview" src="${this._escape(this.previewUrl)}" alt="Uploaded receipt preview">` : (this.previewName ? `<p class="status">Uploaded receipt: ${this._escape(this.previewName)}</p>` : "");
     return `<h2>${this.draftId ? "Review scanned receipt" : "Enter expense"}</h2>${preview}<p class="muted">Review every value before saving. OpenAI output is never posted automatically.</p><form id="expense-form" class="grid">
-      <label>Amount<input id="amount" inputmode="decimal" required placeholder="0.00" value="${this._escape(draft.total || "")}"></label>
+      <label>Amount<input id="amount" type="number" inputmode="decimal" min="0.01" step="0.01" required placeholder="0.00" value="${this._escape(draft.total || "")}"></label>
       <label>Date<input id="date" type="date" required value="${this._escape(draft.occurred_on || today)}"></label>
       <label>Household member<select id="member" required>${options(this.data?.members || [], this.lastMember || "")}</select></label>
       <label>Category<select id="category" required><option value="">Choose a category</option>${options(categories, draft.suggested_category || "")}</select></label>
       <label class="full">Merchant or description<input id="description" maxlength="1000" value="${this._escape(draft.merchant || "")}"></label>
-      <label id="large-wrap" class="full ${Number(draft.total || 0) > 500 ? "" : "hidden"}"><span><input id="large" type="checkbox" style="width:24px;min-height:24px;vertical-align:middle"> I reviewed and confirm this expense over $500</span></label>
-      <button type="button" id="cancel">Cancel</button><button type="submit" class="primary" id="save">${this.draftId ? "Confirm expense" : "Add expense"}</button>
+      ${this.draftId ? `<label id="large-wrap" class="full ${Number(draft.total || 0) > 500 ? "" : "hidden"}"><span><input id="large" type="checkbox" style="width:24px;min-height:24px;vertical-align:middle"> I reviewed and confirm this expense over $500</span></label>` : ""}
+      <button type="button" id="cancel">Cancel</button><button type="submit" class="primary" id="save">${this.draftId ? "Confirm expense" : "Review expense"}</button>
     </form>`;
+  }
+
+  _manualReviewView(draft) {
+    const amount = Number(draft.total || 0);
+    return `<h2>Review expense</h2><p>Confirm these exact details before adding the expense.</p>
+      <div class="row"><div class="row-head"><strong>Amount</strong><span>$${amount.toFixed(2)}</span></div></div>
+      <div class="row"><div class="row-head"><strong>Household member</strong><span>${this._escape(draft.member)}</span></div></div>
+      <div class="row"><div class="row-head"><strong>Category</strong><span>${this._escape(draft.suggested_category)}</span></div></div>
+      <div class="row"><div class="row-head"><strong>Date</strong><span>${this._escape(draft.occurred_on)}</span></div></div>
+      <div class="row"><div class="row-head"><strong>Description</strong><span>${this._escape(draft.merchant || "None")}</span></div></div>
+      <form id="expense-form" class="grid">
+        <input id="amount" type="hidden" value="${this._escape(draft.total)}">
+        <input id="date" type="hidden" value="${this._escape(draft.occurred_on)}">
+        <input id="member" type="hidden" value="${this._escape(draft.member)}">
+        <input id="category" type="hidden" value="${this._escape(draft.suggested_category)}">
+        <input id="description" type="hidden" value="${this._escape(draft.merchant || "")}">
+        ${amount > 500 ? `<label class="full"><span><input id="large" type="checkbox" style="width:24px;min-height:24px;vertical-align:middle"> I reviewed and confirm this expense over $500</span></label>` : ""}
+        <button type="button" id="edit">Edit</button><button type="submit" class="primary" id="save">Add expense</button>
+      </form>`;
   }
 
   _categoryView() {
@@ -125,8 +146,9 @@ class HouseholdBudgetCard extends HTMLElement {
     q("#scan")?.addEventListener("click", () => q("#receipt").click());
     q("#receipt")?.addEventListener("change", (event) => this._scan(event.target.files[0]));
     q("#manual")?.addEventListener("click", () => { this.pendingRequestId=null; this.formOpen=true; this._render(); q("#amount")?.focus(); });
-    q("#cancel")?.addEventListener("click", () => { this.pendingRequestId=null; this._clearPreview(); this.formOpen=false; this.draft=null; this.draftId=null; this.error=""; this._render(); });
-    q("#amount")?.addEventListener("input", (event) => q("#large-wrap").classList.toggle("hidden", Number(event.target.value) <= 500));
+    q("#cancel")?.addEventListener("click", () => { this.pendingRequestId=null; this._clearPreview(); this.formOpen=false; this.reviewing=false; this.draft=null; this.draftId=null; this.error=""; this._render(); });
+    q("#edit")?.addEventListener("click", () => { this.pendingRequestId=null; this.reviewing=false; this.error=""; this._render(); });
+    q("#amount")?.addEventListener("input", (event) => q("#large-wrap")?.classList.toggle("hidden", Number(event.target.value) <= 500));
     q("#expense-form")?.addEventListener("input", () => { this.pendingRequestId=null; });
     q("#expense-form")?.addEventListener("change", () => { this.pendingRequestId=null; });
     q("#expense-form")?.addEventListener("submit", (event) => { event.preventDefault(); this._save(); });
@@ -155,13 +177,18 @@ class HouseholdBudgetCard extends HTMLElement {
 
   async _save() {
     const q=(s)=>this.shadowRoot.querySelector(s); const amount=q("#amount").value.trim();
-    if (Number(amount)>500 && !q("#large")?.checked) { this.error="Review and acknowledge the expense over $500."; this._render(); return; }
+    if ((this.draftId || this.reviewing) && Number(amount)>500 && !q("#large")?.checked) { this.error="Review and acknowledge the expense over $500."; this._render(); return; }
     const member=q("#member").value; const category=q("#category").value; const description=q("#description").value.trim(); const occurredOn=q("#date").value;
+    if (!this.draftId && !this.reviewing) {
+      this.draft={total:amount,member,merchant:description,occurred_on:occurredOn,suggested_category:category};
+      this.lastMember=member; localStorage.setItem("household-budget-last-member",member);
+      this.reviewing=true; this.status="Review the details, then add the expense."; this.error=""; this._render(); return;
+    }
     this.pendingRequestId ||= crypto.randomUUID();
     const payload={ request_id:this.pendingRequestId, amount, member, category, description, occurred_on:occurredOn, confirm_large_expense:Number(amount)>500 };
     this.draft={...(this.draft||{}),total:amount,merchant:description,occurred_on:occurredOn,suggested_category:category};
     this.lastMember=member; localStorage.setItem("household-budget-last-member",member); this.status="Saving expense…"; this.error=""; this._render();
-    try { await this._api(this.draftId ? `receipt/${this.draftId}/confirm` : "expense", "POST", payload); this.status="Expense added successfully."; this.pendingRequestId=null; this._clearPreview(); this.formOpen=false; this.draft=null; this.draftId=null; }
+    try { await this._api(this.draftId ? `receipt/${this.draftId}/confirm` : "expense", "POST", payload); this.status="Expense added successfully."; this.pendingRequestId=null; this._clearPreview(); this.formOpen=false; this.reviewing=false; this.draft=null; this.draftId=null; }
     catch(error){ this.error=error.message || String(error); this.status=""; }
     this._render();
   }
@@ -177,6 +204,8 @@ class HouseholdBudgetCard extends HTMLElement {
   _escape(value) { const div=document.createElement("div"); div.textContent=String(value ?? ""); return div.innerHTML; }
 }
 
-customElements.define("household-budget-card", HouseholdBudgetCard);
+if (!customElements.get("household-budget-card")) {
+  customElements.define("household-budget-card", HouseholdBudgetCard);
+}
 window.customCards = window.customCards || [];
 window.customCards.push({ type:"household-budget-card", name:"Household Budget", description:"Phone-first expense entry, receipt review, categories, and recent expenses." });

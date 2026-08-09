@@ -171,7 +171,10 @@ class BudgetReceiptView(HomeAssistantView):
             temporary_path = temporary_directory / temporary_name
             await hass.async_add_executor_job(temporary_path.write_bytes, body)
             try:
-                ai_entity = _entry(hass).data[CONF_AI_TASK_ENTITY]
+                entry = _entry(hass)
+                ai_entity = entry.options.get(
+                    CONF_AI_TASK_ENTITY, entry.data[CONF_AI_TASK_ENTITY]
+                )
                 service_result = await hass.services.async_call(
                     "ai_task",
                     "generate_data",

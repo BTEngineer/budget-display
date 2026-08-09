@@ -8,12 +8,12 @@ For the versioned 13-command tool contract, see the
 
 ## Release status
 
-Version 0.9.1 is implemented on the development branch. It adds exact
-large-expense confirmations, audit-preserving corrections, atomic split
-expenses, read-only classification suggestions, and server-calculated budget
-outlooks, including the P1 hardening described below. It is not merged,
-deployed to Home Assistant, or enabled in live Hermes. Version 0.8.0 remains
-the published `main` baseline until review.
+Version 0.9.2 is the current app package. It retains the version 0.9.1
+thirteen-tool protocol while adding the stable Supervisor-internal hostname to
+the default Host allowlist for the Home Assistant dashboard. Version 0.9.1
+introduced exact large-expense confirmations, audit-preserving corrections,
+atomic split expenses, read-only classification suggestions, server-calculated
+budget outlooks, and the P1 hardening described below.
 
 ## Configuration
 
@@ -22,9 +22,11 @@ characters. Do not reuse a Home Assistant access token or another account
 password.
 
 `allowed_hosts` contains the exact `Host` headers permitted by the MCP server.
-The generic default contains the local hostname:
+The generic defaults contain the external local hostname and the app's stable
+internal Home Assistant hostname:
 
 - `homeassistant.local:8099`
+- `9930efe6-household-budget-mcp:8099`
 
 Add the LAN address used by the MCP client before connecting it. Entries use
 `host:port` format without `http://` or a path.
@@ -52,6 +54,9 @@ It uses the same bearer token and Host allowlist. The API is intentionally
 limited to configuration, summaries, recent expenses, validated expense/undo
 operations, and the receipt draft lifecycle. It exposes no SQL, shell,
 filesystem browsing, credential, or arbitrary Home Assistant operation.
+Configure the custom integration with
+`http://9930efe6-household-budget-mcp:8099` so Home Assistant uses Supervisor's
+internal app DNS rather than routing back through its LAN hostname.
 
 Receipt files are validated as JPEG, PNG, or PDF, capped at 12 MB, named by
 their SHA-256 digest, and stored privately under `/data/receipts`. AI output is
@@ -358,7 +363,7 @@ member, and parent/child category totals.
 
 ### Validation status
 
-The version 0.9.1 development suite passes 74 automated tests. P1 regression
+The version 0.9.2 source suite passes 74 automated tests. P1 regression
 coverage includes large-correction preparation and mutation rejection, the
 exact $500 correction boundary, concrete single/split occurrence timestamps,
 month-boundary preservation, historical outlooks before and after a correction,
@@ -401,13 +406,12 @@ cleanup procedure.
 
 ### Delivery status and operational boundary
 
-The following delivery record applies to version 0.8.0. Version 0.9.1 remains on
-its development branch. The 0.8 source-delivery workflow is complete: it was
-reviewed on a feature branch, validated, pushed, and merged to `main` through
-pull request #3. That source delivery did not itself deploy or restart the live
-Home Assistant app, alter Hermes configuration, rotate credentials, or perform
-live financial mutations. Those remain separately controlled operational
-actions.
+Version 0.9.1 was reviewed, merged to `main` through pull request #5, tagged,
+and released. Version 0.9.2 is the packaging/configuration follow-up proposed
+through pull request #6. Source delivery does not itself deploy or restart the
+live Home Assistant app, alter Hermes configuration, rotate credentials, or
+perform live financial mutations. Those remain separately controlled
+operational actions.
 
 ## Persistence and backup
 

@@ -1,7 +1,11 @@
 # Home Assistant Household Budget Dashboard - Review Package
 
-Status: implemented locally as version 0.8.0; not installed or validated on the
-live Home Assistant instance.
+Status: version 0.8.0 was deployed to the live Home Assistant instance on
+2026-08-02. The administrator-only **Household Budget** sidebar dashboard,
+custom integration, module resource, and live entity references were read back
+successfully. Rendered phone layout and the financial-write paths were not
+exercised during deployment. Version 0.8.1 is the source follow-up containing
+the reviewed connection-options and manual-entry improvements.
 
 The implementation uses an administrator-only HA browser boundary, keeps the
 budget/OpenAI credentials out of frontend code, and preserves the mandatory
@@ -10,7 +14,8 @@ transaction is successfully committed.
 
 ## Confirmed decisions
 
-- Prepare the design and implementation package before any live deployment.
+- Keep the live dashboard administrator-only until broader access receives a
+  separate security review.
 - Use the OpenAI integration already configured in Home Assistant through the
   `ai_task` interface.
 - Optimize expense entry and receipt capture for phones.
@@ -237,7 +242,8 @@ as text through status and ARIA live regions.
 
 ## Review acceptance criteria
 
-- No live HA configuration is changed during preparation.
+- The live storage-mode dashboard and module resource match this reviewed
+  structure after a fresh configuration readback.
 - Existing Hermes MCP behavior and E1001 entities remain compatible.
 - The dashboard works at 320 CSS pixels without horizontal page scrolling.
 - Every phone action has a 44 by 44 pixel minimum target.
@@ -250,9 +256,9 @@ as text through status and ARIA live regions.
 - Unit tests cover schema migration, upload validation, draft lifecycle,
   duplicate hashes, confirmation idempotency, and failed AI responses.
 
-## Decisions needed before live deployment
+## Follow-up decisions
 
-These can be resolved during review and do not block the design package:
+These do not block the administrator-only deployment:
 
 1. How long should abandoned, unconfirmed receipt images be retained: 7, 30, or
    90 days?

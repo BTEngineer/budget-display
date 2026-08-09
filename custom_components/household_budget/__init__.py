@@ -15,12 +15,14 @@ from .views import VIEWS
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    config = {**entry.data, **entry.options}
     client = BudgetClient(
         async_get_clientsession(hass),
-        entry.data[CONF_BASE_URL],
-        entry.data[CONF_API_TOKEN],
+        config[CONF_BASE_URL],
+        config[CONF_API_TOKEN],
     )
     await client.config()
+    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     domain_data = hass.data.setdefault(DOMAIN, {})
     domain_data[DATA_CLIENT] = client
     domain_data["entry"] = entry
@@ -40,6 +42,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         domain_data["http_registered"] = True
     return True
+
+
+async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload the integration after its connection options change."""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

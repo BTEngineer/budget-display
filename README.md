@@ -113,7 +113,8 @@ are never stored in this repository or the app options.
 3. Refresh the store, open **Household Budget MCP**, and install it.
 4. In **Configuration**, replace the generic members and categories, optionally
    define classification aliases, set the timezone, and add the LAN `host:port`
-   used by the MCP client to `allowed_hosts`.
+   used by the MCP client to `allowed_hosts`. Keep the default internal
+   `9930efe6-household-budget-mcp:8099` entry for the Home Assistant dashboard.
 5. Set `api_token` to a unique random value of at least 32 characters. Do not
    reuse a Home Assistant token or another password.
 6. Start the app and confirm its log says it is listening on port 8099.
@@ -134,18 +135,25 @@ python -m unittest discover -s tests -v
 
 ## Home Assistant phone dashboard
 
-The local implementation is under `custom_components/household_budget`. After
-review, copy that directory into Home Assistant's `/config/custom_components`,
-restart Home Assistant, and add the **Household Budget** integration. Configure
-the local app URL, its dedicated API token, and the existing OpenAI AI Task
-entity. Then register this dashboard module resource:
+The version 0.8.1 implementation is under
+`custom_components/household_budget`. The August 2 live validation used version
+0.8.0, connected to the local app and its existing OpenAI AI Task entity, with
+an administrator-only **Household Budget** dashboard in the sidebar. A fresh
+installation should copy that directory into Home Assistant's configuration
+`custom_components` directory, restart Home Assistant, add the integration,
+and register the module resource shown below.
+
+Use `http://9930efe6-household-budget-mcp:8099` as the integration's app URL.
+The integration's **Configure** flow can update the URL, token, or AI Task
+entity later without deleting and recreating the config entry.
 
 ```text
 /household_budget_static/household-budget-card.js
 ```
 
-Use `home_assistant/household-budget-dashboard.preview.yaml` as the dashboard
-starting point. The custom card never receives the app token or OpenAI key.
+`home_assistant/household-budget-dashboard.preview.yaml` records the deployed
+dashboard structure and can be used as a starting point on another instance.
+The custom card never receives the app token or OpenAI key.
 Receipt uploads accept JPEG, PNG, or PDF up to 12 MB, request the rear camera on
 supported phones, and always require a review screen before ledger insertion.
 After the reviewed transaction is committed, the source receipt file is deleted
