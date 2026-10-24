@@ -46,6 +46,7 @@ MAX_REQUEST_ID_LENGTH = 200
 MAX_BUSINESS_NAME_LENGTH = 200
 MAX_ENTRY_DESCRIPTION_LENGTH = 1000
 SUPPORTED_OPERATION_TYPES = {"expense", "refund", "reversal"}
+SUPPORTED_RECONCILIATION_STATUSES = {"all", "reconciled", "unreconciled"}
 MAX_SPLIT_ALLOCATIONS = 20
 CONFIRMATION_TTL_SECONDS = 10 * 60
 LARGE_EXPENSE_CENTS = 50_000
@@ -396,6 +397,7 @@ class BudgetLedger:
                         (row["id"],),
                     )
             connection.commit()
+            self._initialize_reconciliation_schema(connection)
 
     def register_receipt(
         self,
@@ -920,6 +922,174 @@ class BudgetLedger:
             result = self._entry(connection, cursor.lastrowid, duplicate=False)
             connection.commit()
             return result
+
+    @staticmethod
+    def _initialize_reconciliation_schema(connection: sqlite3.Connection) -> None:
+        """Add and validate reconciliation storage without touching ledger rows."""
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'ledger_entries'"
+            ).fetchone() is None:
+                raise BudgetValidationError("base ledger_entries table is unavailable")
+            marker = connection.execute(
+                "SELECT value FROM ledger_metadata "
+                "WHERE key = 'reconciliation_schema_version'"
+            ).fetchone()
+            if marker is not None and marker["value"] != "1":
+                raise BudgetValidationError(
+                    "inconsistent reconciliation schema: version marker"
+                )
+            audit_tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' "
+                    "AND name IN ('transaction_reconciliation_operations', "
+                    "'transaction_reconciliation_targets')"
+                )
+            }
+            if len(audit_tables) < 2 and (
+                marker is not None
+                or any(
+                    connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+                    is not None
+                    for table in audit_tables
+                )
+            ):
+                raise BudgetValidationError(
+                    "inconsistent reconciliation schema: missing audit tables"
+                )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS transaction_reconciliation_operations (
+                    id INTEGER PRIMARY KEY,
+                    request_id TEXT NOT NULL UNIQUE,
+                    action TEXT NOT NULL CHECK (action IN ('reconcile', 'unreconcile')),
+                    payload_digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS transaction_reconciliation_targets (
+                    reconciliation_operation_id INTEGER NOT NULL
+                        REFERENCES transaction_reconciliation_operations(id),
+                    ledger_entry_id INTEGER NOT NULL REFERENCES ledger_entries(id),
+                    PRIMARY KEY (reconciliation_operation_id, ledger_entry_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS transaction_reconciliation_targets_entry
+                ON transaction_reconciliation_targets(
+                    ledger_entry_id, reconciliation_operation_id
+                )
+                """
+            )
+            expected_columns = {
+                "transaction_reconciliation_operations": {
+                    "id",
+                    "request_id",
+                    "action",
+                    "payload_digest",
+                    "created_at",
+                },
+                "transaction_reconciliation_targets": {
+                    "reconciliation_operation_id",
+                    "ledger_entry_id",
+                },
+            }
+            for table, expected in expected_columns.items():
+                column_rows = connection.execute(
+                    f"PRAGMA table_info({table})"
+                ).fetchall()
+                if {row["name"] for row in column_rows} != expected:
+                    raise BudgetValidationError(
+                        f"inconsistent reconciliation schema: {table} columns"
+                    )
+            operation_columns = {
+                row["name"]: row
+                for row in connection.execute(
+                    "PRAGMA table_info(transaction_reconciliation_operations)"
+                )
+            }
+            target_columns = {
+                row["name"]: row
+                for row in connection.execute(
+                    "PRAGMA table_info(transaction_reconciliation_targets)"
+                )
+            }
+            if (
+                operation_columns["id"]["pk"] != 1
+                or operation_columns["request_id"]["notnull"] != 1
+                or operation_columns["action"]["notnull"] != 1
+                or operation_columns["payload_digest"]["notnull"] != 1
+                or operation_columns["created_at"]["notnull"] != 1
+                or target_columns["reconciliation_operation_id"]["pk"] != 1
+                or target_columns["ledger_entry_id"]["pk"] != 2
+            ):
+                raise BudgetValidationError(
+                    "inconsistent reconciliation schema: constraints"
+                )
+            unique_request_index = any(
+                row["unique"]
+                and [
+                    column["name"]
+                    for column in connection.execute(
+                        f"PRAGMA index_info({row['name']})"
+                    )
+                ]
+                == ["request_id"]
+                for row in connection.execute(
+                    "PRAGMA index_list(transaction_reconciliation_operations)"
+                ).fetchall()
+            )
+            table_sql = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND "
+                "name = 'transaction_reconciliation_operations'"
+            ).fetchone()["sql"]
+            if not unique_request_index or "'reconcile', 'unreconcile'" not in table_sql:
+                raise BudgetValidationError(
+                    "inconsistent reconciliation schema: constraints"
+                )
+            foreign_keys = {
+                (row["from"], row["table"], row["to"])
+                for row in connection.execute(
+                    "PRAGMA foreign_key_list(transaction_reconciliation_targets)"
+                )
+            }
+            if foreign_keys != {
+                (
+                    "reconciliation_operation_id",
+                    "transaction_reconciliation_operations",
+                    "id",
+                ),
+                ("ledger_entry_id", "ledger_entries", "id"),
+            }:
+                raise BudgetValidationError(
+                    "inconsistent reconciliation schema: foreign keys"
+                )
+            index_columns = [
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA index_info(transaction_reconciliation_targets_entry)"
+                )
+            ]
+            if index_columns != ["ledger_entry_id", "reconciliation_operation_id"]:
+                raise BudgetValidationError(
+                    "inconsistent reconciliation schema: lookup index"
+                )
+            connection.execute(
+                "INSERT OR IGNORE INTO ledger_metadata(key, value) "
+                "VALUES ('reconciliation_schema_version', '1')"
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
 
     def prepare_correction(
         self,
@@ -1608,6 +1778,168 @@ class BudgetLedger:
             connection.commit()
             return result
 
+    def set_transaction_reconciliation(
+        self,
+        *,
+        request_id: str,
+        transaction_id: str,
+        reconciled: bool,
+    ) -> dict[str, object]:
+        """Atomically reconcile one transaction or every allocation in its split."""
+        request_id = self._validated_request_id(request_id)
+        if not isinstance(transaction_id, str):
+            raise BudgetValidationError("transaction_id is required")
+        transaction_id = transaction_id.strip()
+        if not transaction_id or len(transaction_id) > MAX_SEARCH_TEXT_LENGTH:
+            raise BudgetValidationError("transaction_id is invalid")
+        if not isinstance(reconciled, bool):
+            raise BudgetValidationError("reconciled must be a boolean")
+        action = "reconcile" if reconciled else "unreconcile"
+
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            target = connection.execute(
+                "SELECT id, operation_type, split_group_id FROM ledger_entries "
+                "WHERE transaction_id = ?",
+                (transaction_id,),
+            ).fetchone()
+            if target is None:
+                raise BudgetValidationError("transaction was not found")
+            if target["operation_type"] == "reversal":
+                raise BudgetValidationError(
+                    "internal reversal entries cannot be reconciled"
+                )
+            if target["operation_type"] not in ("expense", "refund"):
+                raise BudgetValidationError("unsupported reconciliation target")
+            if target["split_group_id"] is None:
+                targets = connection.execute(
+                    "SELECT id, transaction_id, split_group_id FROM ledger_entries "
+                    "WHERE id = ?",
+                    (target["id"],),
+                ).fetchall()
+            else:
+                targets = connection.execute(
+                    "SELECT id, transaction_id, split_group_id FROM ledger_entries "
+                    "WHERE split_group_id = ? ORDER BY id",
+                    (target["split_group_id"],),
+                ).fetchall()
+            target_ids = [int(row["id"]) for row in targets]
+            transaction_ids = [str(row["transaction_id"]) for row in targets]
+            digest = hashlib.sha256(
+                json.dumps(
+                    {"action": action, "transaction_ids": sorted(transaction_ids)},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+
+            existing = connection.execute(
+                "SELECT id, action, payload_digest, created_at "
+                "FROM transaction_reconciliation_operations WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if existing is not None:
+                existing_targets = connection.execute(
+                    "SELECT target.ledger_entry_id, entry.transaction_id "
+                    "FROM transaction_reconciliation_targets target "
+                    "JOIN ledger_entries entry ON entry.id = target.ledger_entry_id "
+                    "WHERE target.reconciliation_operation_id = ? ORDER BY entry.id",
+                    (existing["id"],),
+                ).fetchall()
+                if (
+                    existing["action"] != action
+                    or existing["payload_digest"] != digest
+                    or [int(row["ledger_entry_id"]) for row in existing_targets]
+                    != target_ids
+                ):
+                    raise DuplicateRequestError(
+                        "request_id was already used for a different reconciliation"
+                    )
+                changed = self._reconciliation_operation_changed(
+                    connection,
+                    operation_id=int(existing["id"]),
+                    target_ids=target_ids,
+                    reconciled=reconciled,
+                )
+                connection.commit()
+                return {
+                    "changed": changed,
+                    "duplicate": True,
+                    "reconciled": reconciled,
+                    "reconciled_at": existing["created_at"] if reconciled else None,
+                    "transaction_ids": [
+                        str(row["transaction_id"]) for row in existing_targets
+                    ],
+                    "split_transaction_id": target["split_group_id"],
+                }
+
+            prior_states = [
+                self._current_reconciliation_state(connection, entry_id)[0]
+                for entry_id in target_ids
+            ]
+            changed = any(state != reconciled for state in prior_states)
+            created_at = _utc_now()
+            cursor = connection.execute(
+                "INSERT INTO transaction_reconciliation_operations("
+                "request_id, action, payload_digest, created_at) VALUES (?, ?, ?, ?)",
+                (request_id, action, digest, created_at),
+            )
+            operation_id = int(cursor.lastrowid)
+            connection.executemany(
+                "INSERT INTO transaction_reconciliation_targets("
+                "reconciliation_operation_id, ledger_entry_id) VALUES (?, ?)",
+                [(operation_id, entry_id) for entry_id in target_ids],
+            )
+            connection.commit()
+            return {
+                "changed": changed,
+                "duplicate": False,
+                "reconciled": reconciled,
+                "reconciled_at": created_at if reconciled else None,
+                "transaction_ids": transaction_ids,
+                "split_transaction_id": target["split_group_id"],
+            }
+
+    @staticmethod
+    def _current_reconciliation_state(
+        connection: sqlite3.Connection, entry_id: int, *, before_operation_id: int | None = None
+    ) -> tuple[bool, str | None]:
+        condition = " AND operation.id < ?" if before_operation_id is not None else ""
+        parameters: tuple[object, ...] = (
+            (entry_id, before_operation_id)
+            if before_operation_id is not None
+            else (entry_id,)
+        )
+        row = connection.execute(
+            "SELECT operation.action, operation.created_at "
+            "FROM transaction_reconciliation_targets target "
+            "JOIN transaction_reconciliation_operations operation "
+            "ON operation.id = target.reconciliation_operation_id "
+            f"WHERE target.ledger_entry_id = ?{condition} "
+            "ORDER BY operation.id DESC LIMIT 1",
+            parameters,
+        ).fetchone()
+        if row is None or row["action"] == "unreconcile":
+            return False, None
+        return True, str(row["created_at"])
+
+    @classmethod
+    def _reconciliation_operation_changed(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        operation_id: int,
+        target_ids: Sequence[int],
+        reconciled: bool,
+    ) -> bool:
+        return any(
+            cls._current_reconciliation_state(
+                connection, entry_id, before_operation_id=operation_id
+            )[0]
+            != reconciled
+            for entry_id in target_ids
+        )
+
     def search_transactions(
         self,
         *,
@@ -1623,6 +1955,7 @@ class BudgetLedger:
         request_id: str | None = None,
         operation_type: str = "all",
         status: str = "active",
+        reconciliation_status: str = "all",
         sort_order: str = "descending",
         limit: int = DEFAULT_SEARCH_LIMIT,
         cursor: str | None = None,
@@ -1634,6 +1967,8 @@ class BudgetLedger:
             raise BudgetValidationError("unsupported operation_type")
         if status not in ("active", "reversed", "all"):
             raise BudgetValidationError("unsupported status")
+        if reconciliation_status not in SUPPORTED_RECONCILIATION_STATUSES:
+            raise BudgetValidationError("unsupported reconciliation_status")
         if sort_order not in ("ascending", "descending"):
             raise BudgetValidationError("sort_order must be ascending or descending")
 
@@ -1675,8 +2010,12 @@ class BudgetLedger:
             "status": status,
             "sort_order": sort_order,
         }
+        if reconciliation_status != "all":
+            filter_state["reconciliation_status"] = reconciliation_status
 
         with self._connection() as connection:
+            # Keep ID selection, canonical records and cursors in one read snapshot.
+            connection.execute("BEGIN")
             conditions: list[str] = []
             parameters: list[object] = []
             if start_value is not None:
@@ -1731,6 +2070,21 @@ class BudgetLedger:
                     "(SELECT 1 FROM ledger_entries reversal "
                     "WHERE reversal.reverses_entry_id = entry.id)"
                 )
+            if reconciliation_status != "all":
+                latest_action = (
+                    "(SELECT operation.action "
+                    "FROM transaction_reconciliation_targets target "
+                    "JOIN transaction_reconciliation_operations operation "
+                    "ON operation.id = target.reconciliation_operation_id "
+                    "WHERE target.ledger_entry_id = entry.id "
+                    "ORDER BY operation.id DESC LIMIT 1)"
+                )
+                if reconciliation_status == "reconciled":
+                    conditions.append(f"{latest_action} = 'reconcile'")
+                else:
+                    conditions.append(
+                        f"COALESCE({latest_action}, 'unreconcile') = 'unreconcile'"
+                    )
 
             filter_digest = hashlib.sha256(
                 json.dumps(filter_state, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1850,7 +2204,6 @@ class BudgetLedger:
                     score=score,
                     reason=reason,
                 )
-
             if business_name:
                 rows = connection.execute(
                     """
@@ -2815,6 +3168,22 @@ class BudgetLedger:
                    corrected_original.transaction_id AS corrects_transaction_id,
                    corrected_by.transaction_id AS corrected_by_transaction_id,
                    split_operation.request_id AS split_request_id,
+                   (
+                       SELECT operation.action
+                       FROM transaction_reconciliation_targets target
+                       JOIN transaction_reconciliation_operations operation
+                         ON operation.id = target.reconciliation_operation_id
+                       WHERE target.ledger_entry_id = entry.id
+                       ORDER BY operation.id DESC LIMIT 1
+                   ) AS reconciliation_action,
+                   (
+                       SELECT operation.created_at
+                       FROM transaction_reconciliation_targets target
+                       JOIN transaction_reconciliation_operations operation
+                         ON operation.id = target.reconciliation_operation_id
+                       WHERE target.ledger_entry_id = entry.id
+                       ORDER BY operation.id DESC LIMIT 1
+                   ) AS reconciliation_at,
                    COALESCE((
                        SELECT SUM(-refund.amount_cents)
                        FROM ledger_entries refund
@@ -2877,6 +3246,12 @@ class BudgetLedger:
             "occurred_at": row["occurred_at"],
             "recorded_at": row["created_at"],
             "status": status,
+            "reconciled": row["reconciliation_action"] == "reconcile",
+            "reconciled_at": (
+                row["reconciliation_at"]
+                if row["reconciliation_action"] == "reconcile"
+                else None
+            ),
             "reversal_of_transaction_id": row["reversal_of_transaction_id"],
             "reversed_by_transaction_id": row["reversed_by_transaction_id"],
             "corrects_transaction_id": row["corrects_transaction_id"],

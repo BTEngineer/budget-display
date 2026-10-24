@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -897,7 +898,8 @@ class BudgetLedgerTests(unittest.TestCase):
         self.assertEqual(history["suggestions"][0]["category"], "Everyday")
         self.assertEqual(history["suggestions"][0]["sample_count"], 1)
 
-    def test_budget_outlook_calculates_projection_comparison_and_risk(self) -> None:
+    @patch("budget_display.ledger._utc_now", return_value="2026-08-10T15:00:00+00:00")
+    def test_budget_outlook_calculates_projection_comparison_and_risk(self, _clock) -> None:
         self.ledger.add_expense(
             request_id="outlook-current",
             member="Member 1",
@@ -1134,6 +1136,438 @@ class BudgetLedgerTests(unittest.TestCase):
         )
         self.assertFalse(committed["duplicate"])
         self.assertEqual(len(committed["allocations"]), 20)
+
+    def test_reconciliation_schema_migration_is_additive_and_idempotent(self) -> None:
+        entry = self.ledger.add_expense(
+            request_id="migration-entry",
+            member="Member 1",
+            category="Everyday",
+            amount="12.34",
+            occurred_at="2026-08-01T12:00:00+00:00",
+        )
+        self.ledger.refund_expense(
+            request_id="migration-refund",
+            expense_id=entry["transaction"]["transaction_id"],
+            amount="2.34",
+            occurred_at="2026-08-02T12:00:00+00:00",
+        )
+        self.ledger.add_split_expense(
+            request_id="migration-split",
+            total_amount="3.00",
+            allocations=[
+                {"member": "Member 1", "category": "Everyday", "amount": "1.00"},
+                {"member": "Member 2", "category": "Occasional", "amount": "2.00"},
+            ],
+            occurred_at="2026-08-03T12:00:00+00:00",
+        )
+        before_summary = self.ledger.list_spending(month="2026-08")
+        before_search = [
+            {
+                key: value
+                for key, value in row.items()
+                if key not in {"reconciled", "reconciled_at"}
+            }
+            for row in self.ledger.search_transactions(
+                status="all", sort_order="ascending"
+            )["transactions"]
+        ]
+        with self.ledger._connection() as connection:
+            before = [
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT * FROM ledger_entries ORDER BY id"
+                ).fetchall()
+            ]
+            connection.execute("DROP TABLE transaction_reconciliation_targets")
+            connection.execute("DROP TABLE transaction_reconciliation_operations")
+            connection.execute(
+                "DELETE FROM ledger_metadata WHERE key = 'reconciliation_schema_version'"
+            )
+            connection.commit()
+
+        self.ledger.initialize()
+        self.ledger.initialize()
+        with self.ledger._connection() as connection:
+            after = [
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT * FROM ledger_entries ORDER BY id"
+                ).fetchall()
+            ]
+            marker = connection.execute(
+                "SELECT value FROM ledger_metadata "
+                "WHERE key = 'reconciliation_schema_version'"
+            ).fetchone()["value"]
+            self.assertEqual(
+                connection.execute("PRAGMA quick_check").fetchone()[0], "ok"
+            )
+            self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO transaction_reconciliation_targets "
+                    "VALUES (999999, 999999)"
+                )
+        self.assertEqual(before, after)
+        self.assertEqual(before_summary, self.ledger.list_spending(month="2026-08"))
+        after_search = [
+            {
+                key: value
+                for key, value in row.items()
+                if key not in {"reconciled", "reconciled_at"}
+            }
+            for row in self.ledger.search_transactions(
+                status="all", sort_order="ascending"
+            )["transactions"]
+        ]
+        self.assertEqual(before_search, after_search)
+        self.assertEqual(marker, "1")
+        canonical = self.ledger.search_transactions(
+            transaction_id=entry["transaction"]["transaction_id"]
+        )["transactions"][0]
+        self.assertFalse(canonical["reconciled"])
+        self.assertIsNone(canonical["reconciled_at"])
+        with self.ledger._connection() as connection:
+            connection.execute(
+                "UPDATE ledger_metadata SET value = '2' "
+                "WHERE key = 'reconciliation_schema_version'"
+            )
+            connection.commit()
+        with self.assertRaisesRegex(BudgetValidationError, "version marker"):
+            self.ledger.initialize()
+
+    def test_partial_reconciliation_schema_completes_and_inconsistent_schema_fails(self) -> None:
+        with self.ledger._connection() as connection:
+            connection.execute(
+                "DELETE FROM ledger_metadata WHERE key = 'reconciliation_schema_version'"
+            )
+            connection.execute("DROP TABLE transaction_reconciliation_targets")
+            connection.commit()
+        self.ledger.initialize()
+        with self.ledger._connection() as connection:
+            self.assertIsNotNone(
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'transaction_reconciliation_targets'"
+                ).fetchone()
+            )
+            connection.execute("DROP TABLE transaction_reconciliation_targets")
+            connection.execute("DROP TABLE transaction_reconciliation_operations")
+            connection.execute(
+                "CREATE TABLE transaction_reconciliation_operations(id INTEGER PRIMARY KEY)"
+            )
+            connection.execute(
+                "DELETE FROM ledger_metadata WHERE key = 'reconciliation_schema_version'"
+            )
+            connection.commit()
+        with self.assertRaisesRegex(BudgetValidationError, "inconsistent reconciliation schema"):
+            self.ledger.initialize()
+        with self.ledger._connection() as connection:
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT value FROM ledger_metadata "
+                    "WHERE key = 'reconciliation_schema_version'"
+                ).fetchone()
+            )
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'transaction_reconciliation_targets'"
+                ).fetchone()
+            )
+
+    def test_missing_initialized_reconciliation_tables_fail_closed(self) -> None:
+        operations = "transaction_reconciliation_operations"
+        targets = "transaction_reconciliation_targets"
+        for missing in ((targets,), (operations,), (targets, operations)):
+            for keep_marker in (True, False):
+                if len(missing) == 2 and not keep_marker:
+                    continue  # No surviving marker or audit data can reveal prior use.
+                with self.subTest(missing=missing, keep_marker=keep_marker):
+                    database = Path(self.temporary_directory.name) / (
+                        f"missing-{len(missing)}-{missing[0]}-{keep_marker}.db"
+                    )
+                    ledger = BudgetLedger(database)
+                    ledger.initialize()
+                    entry = ledger.add_expense(
+                        request_id="expense", member="Member 1",
+                        category="Everyday", amount="1.00",
+                    )
+                    ledger.set_transaction_reconciliation(
+                        request_id="mark",
+                        transaction_id=entry["transaction"]["transaction_id"],
+                        reconciled=True,
+                    )
+                    with ledger._connection() as connection:
+                        connection.execute("PRAGMA foreign_keys = OFF")
+                        if not keep_marker:
+                            connection.execute(
+                                "DELETE FROM ledger_metadata "
+                                "WHERE key = 'reconciliation_schema_version'"
+                            )
+                        for table in missing:
+                            connection.execute(f"DROP TABLE {table}")
+                        connection.commit()
+                    with self.assertRaisesRegex(BudgetValidationError, "missing audit tables"):
+                        ledger.initialize()
+                    with ledger._connection() as connection:
+                        for table in missing:
+                            self.assertIsNone(connection.execute(
+                                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                                (table,),
+                            ).fetchone())
+
+        # Even an unused database with a completed migration must not be repaired silently.
+        with self.ledger._connection() as connection:
+            connection.execute("DROP TABLE transaction_reconciliation_targets")
+            connection.commit()
+        with self.assertRaisesRegex(BudgetValidationError, "missing audit tables"):
+            self.ledger.initialize()
+
+    def test_reconciliation_search_keeps_snapshot_during_concurrent_writes(self) -> None:
+        for initially_reconciled in (True, False):
+            with self.subTest(initially_reconciled=initially_reconciled):
+                ledger = BudgetLedger(
+                    Path(self.temporary_directory.name) / f"snapshot-{initially_reconciled}.db"
+                )
+                ledger.initialize()
+                transaction_ids = []
+                for index in range(3):
+                    entry = ledger.add_expense(
+                        request_id=f"expense-{index}", member="Member 1",
+                        category="Everyday", amount="1.00",
+                    )
+                    transaction_id = entry["transaction"]["transaction_id"]
+                    transaction_ids.append(transaction_id)
+                    if initially_reconciled:
+                        ledger.set_transaction_reconciliation(
+                            request_id=f"initial-{index}", transaction_id=transaction_id,
+                            reconciled=True,
+                        )
+                canonical_entry = ledger._canonical_entry
+                writer_committed = False
+
+                def interleaved_canonical(connection, entry_id):
+                    nonlocal writer_committed
+                    if not writer_committed:
+                        for index, transaction_id in enumerate(transaction_ids):
+                            ledger.set_transaction_reconciliation(
+                                request_id=f"concurrent-{index}", transaction_id=transaction_id,
+                                reconciled=not initially_reconciled,
+                            )
+                        writer_committed = True
+                    return canonical_entry(connection, entry_id)
+
+                status = "reconciled" if initially_reconciled else "unreconciled"
+                with patch.object(ledger, "_canonical_entry", side_effect=interleaved_canonical):
+                    result = ledger.search_transactions(reconciliation_status=status, limit=2)
+                self.assertTrue(writer_committed)
+                self.assertEqual(result["count"], 2)
+                self.assertTrue(result["has_more"])
+                self.assertIsNotNone(result["next_cursor"])
+                self.assertTrue(all(
+                    row["reconciled"] == initially_reconciled
+                    for row in result["transactions"]
+                ))
+                self.assertEqual(ledger.search_transactions(reconciliation_status=status)["count"], 0)
+                opposite = "unreconciled" if initially_reconciled else "reconciled"
+                self.assertEqual(ledger.search_transactions(reconciliation_status=opposite)["count"], 3)
+
+    def test_reconciliation_mark_retry_conflict_noop_and_unmark(self) -> None:
+        entry = self.ledger.add_expense(
+            request_id="reconcile-expense",
+            member="Member 1",
+            category="Everyday",
+            amount="10.00",
+        )
+        transaction_id = entry["transaction"]["transaction_id"]
+        marked = self.ledger.set_transaction_reconciliation(
+            request_id="reconcile-1", transaction_id=transaction_id, reconciled=True
+        )
+        retry = self.ledger.set_transaction_reconciliation(
+            request_id="reconcile-1", transaction_id=transaction_id, reconciled=True
+        )
+        noop = self.ledger.set_transaction_reconciliation(
+            request_id="reconcile-2", transaction_id=transaction_id, reconciled=True
+        )
+        self.assertTrue(marked["changed"])
+        self.assertTrue(retry["duplicate"])
+        self.assertTrue(retry["changed"])
+        self.assertFalse(noop["changed"])
+        with self.assertRaises(DuplicateRequestError):
+            self.ledger.set_transaction_reconciliation(
+                request_id="reconcile-1",
+                transaction_id=transaction_id,
+                reconciled=False,
+            )
+        unmarked = self.ledger.set_transaction_reconciliation(
+            request_id="reconcile-3", transaction_id=transaction_id, reconciled=False
+        )
+        self.assertTrue(unmarked["changed"])
+        canonical = self.ledger.search_transactions(
+            transaction_id=transaction_id
+        )["transactions"][0]
+        self.assertFalse(canonical["reconciled"])
+        self.assertIsNone(canonical["reconciled_at"])
+        with self.ledger._connection() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM transaction_reconciliation_operations"
+                ).fetchone()[0],
+                3,
+            )
+
+    def test_reconciliation_filters_cursor_and_split_are_atomic(self) -> None:
+        ordinary = self.ledger.add_expense(
+            request_id="ordinary-unreconciled",
+            member="Member 1",
+            category="Everyday",
+            amount="1.00",
+            occurred_at="2026-08-01T10:00:00+00:00",
+        )
+        split = self.ledger.add_split_expense(
+            request_id="reconcile-split",
+            total_amount="3.00",
+            allocations=[
+                {"member": "Member 1", "category": "Everyday", "amount": "1.00"},
+                {"member": "Member 2", "category": "Occasional", "amount": "2.00"},
+            ],
+            occurred_at="2026-08-02T10:00:00+00:00",
+        )
+        legacy_page = self.ledger.search_transactions(limit=1)
+        result = self.ledger.set_transaction_reconciliation(
+            request_id="reconcile-split-operation",
+            transaction_id=split["allocations"][0]["transaction_id"],
+            reconciled=True,
+        )
+        self.assertEqual(len(result["transaction_ids"]), 2)
+        self.assertEqual(result["split_transaction_id"], split["split_transaction_id"])
+        reconciled = self.ledger.search_transactions(
+            reconciliation_status="reconciled", sort_order="ascending"
+        )["transactions"]
+        unreconciled = self.ledger.search_transactions(
+            reconciliation_status="unreconciled"
+        )["transactions"]
+        self.assertEqual(len(reconciled), 2)
+        self.assertTrue(all(row["reconciled"] for row in reconciled))
+        self.assertEqual(
+            [row["transaction_id"] for row in unreconciled],
+            [ordinary["transaction"]["transaction_id"]],
+        )
+        continued = self.ledger.search_transactions(
+            limit=1, cursor=legacy_page["next_cursor"]
+        )
+        self.assertEqual(continued["count"], 1)
+        with self.assertRaisesRegex(BudgetValidationError, "cursor is invalid"):
+            self.ledger.search_transactions(
+                reconciliation_status="reconciled",
+                limit=1,
+                cursor=legacy_page["next_cursor"],
+            )
+
+    def test_refunds_can_be_reconciled_but_reversals_cannot(self) -> None:
+        expense = self.ledger.add_expense(
+            request_id="reconcile-refund-original",
+            member="Member 1",
+            category="Everyday",
+            amount="10.00",
+        )
+        refund = self.ledger.refund_expense(
+            request_id="reconcile-refund",
+            expense_id=expense["transaction"]["transaction_id"],
+            amount="2.00",
+        )
+        result = self.ledger.set_transaction_reconciliation(
+            request_id="mark-refund",
+            transaction_id=refund["transaction"]["transaction_id"],
+            reconciled=True,
+        )
+        self.assertTrue(result["changed"])
+        reversible = self.ledger.add_expense(
+            request_id="reconcile-reversible",
+            member="Member 1",
+            category="Everyday",
+            amount="1.00",
+        )
+        reversal = self.ledger.undo_last_expense(
+            request_id="reconcile-undo", member="Member 1", entry_id=reversible["id"]
+        )
+        with self.assertRaisesRegex(BudgetValidationError, "reversal entries"):
+            self.ledger.set_transaction_reconciliation(
+                request_id="mark-reversal",
+                transaction_id=reversal["transaction"]["transaction_id"],
+                reconciled=True,
+            )
+
+    def test_correction_replacement_starts_unreconciled(self) -> None:
+        original = self.ledger.add_expense(
+            request_id="reconciled-before-correction",
+            member="Member 1",
+            category="Everyday",
+            amount="10.00",
+        )
+        original_id = original["transaction"]["transaction_id"]
+        self.ledger.set_transaction_reconciliation(
+            request_id="mark-before-correction",
+            transaction_id=original_id,
+            reconciled=True,
+        )
+        correction = self.ledger.correct_expense(
+            request_id="replacement-after-reconciliation",
+            transaction_id=original_id,
+            amount="11.00",
+        )
+        history = self.ledger.search_transactions(status="all")["transactions"]
+        by_id = {row["transaction_id"]: row for row in history}
+        self.assertTrue(by_id[original_id]["reconciled"])
+        self.assertFalse(
+            by_id[correction["replacement"]["transaction_id"]]["reconciled"]
+        )
+
+    def test_concurrent_reconciliation_serializes_and_failed_target_insert_rolls_back(self) -> None:
+        entry = self.ledger.add_expense(
+            request_id="concurrent-reconciliation",
+            member="Member 1",
+            category="Everyday",
+            amount="1.00",
+        )
+        transaction_id = entry["transaction"]["transaction_id"]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(
+                pool.map(
+                    lambda values: self.ledger.set_transaction_reconciliation(
+                        request_id=values[0],
+                        transaction_id=transaction_id,
+                        reconciled=values[1],
+                    ),
+                    (("concurrent-true", True), ("concurrent-false", False)),
+                )
+            )
+        self.assertEqual(len(results), 2)
+        with self.ledger._connection() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM transaction_reconciliation_operations"
+                ).fetchone()[0],
+                2,
+            )
+            connection.execute(
+                "CREATE TRIGGER reject_reconciliation_target BEFORE INSERT ON "
+                "transaction_reconciliation_targets BEGIN SELECT RAISE(ABORT, 'test'); END"
+            )
+            connection.commit()
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.ledger.set_transaction_reconciliation(
+                request_id="rolled-back-reconciliation",
+                transaction_id=transaction_id,
+                reconciled=True,
+            )
+        with self.ledger._connection() as connection:
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT 1 FROM transaction_reconciliation_operations "
+                    "WHERE request_id = 'rolled-back-reconciliation'"
+                ).fetchone()
+            )
 
 
 if __name__ == "__main__":

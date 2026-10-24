@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from mcp import Client
 
@@ -28,7 +29,7 @@ class BudgetMCPServerTests(unittest.TestCase):
 
         return asyncio.run(invoke())
 
-    def test_exposes_only_the_thirteen_approved_tools(self) -> None:
+    def test_exposes_only_the_fourteen_approved_tools(self) -> None:
         async def list_tools() -> dict[str, dict[str, object]]:
             async with Client(self.server) as client:
                 result = await client.list_tools()
@@ -50,12 +51,23 @@ class BudgetMCPServerTests(unittest.TestCase):
                 "get_budget_outlook",
                 "undo_last_expense",
                 "search_transactions",
+                "set_transaction_reconciliation",
                 "refund_expense",
             },
         )
         self.assertTrue(
-            {"category", "business_name", "cursor", "operation_type"}
+            {
+                "category",
+                "business_name",
+                "cursor",
+                "operation_type",
+                "reconciliation_status",
+            }
             <= set(tools["search_transactions"]["properties"])
+        )
+        self.assertEqual(
+            set(tools["set_transaction_reconciliation"]["required"]),
+            {"request_id", "transaction_id", "reconciled"},
         )
         self.assertEqual(
             set(tools["refund_expense"]["required"]), {"request_id", "amount"}
@@ -136,7 +148,8 @@ class BudgetMCPServerTests(unittest.TestCase):
         self.assertTrue(self.call("prepare_expense", too_long).is_error)
         self.assertTrue(self.call("add_expense", too_long).is_error)
 
-    def test_new_write_and_read_tools_round_trip_through_mcp(self) -> None:
+    @patch("budget_display.ledger._utc_now", return_value="2026-08-10T15:00:00+00:00")
+    def test_new_write_and_read_tools_round_trip_through_mcp(self, _clock) -> None:
         original = self.call(
             "add_expense",
             {
@@ -449,6 +462,42 @@ class BudgetMCPServerTests(unittest.TestCase):
         self.assertEqual(canonical["refund_link_status"], "linked")
         self.assertEqual(canonical["refund_of_transaction_id"], transaction_id)
         self.assertEqual(self.ledger.list_spending(month="2026-08")["spent_cents"], 1750)
+
+    def test_reconciliation_round_trip_through_mcp(self) -> None:
+        added = self.call(
+            "add_expense",
+            {
+                "request_id": "mcp-reconciliation-expense",
+                "member": "Member 1",
+                "category": "Everyday",
+                "amount": "4.00",
+            },
+        )
+        transaction_id = added.structured_content["transaction"]["transaction_id"]
+        marked = self.call(
+            "set_transaction_reconciliation",
+            {
+                "request_id": "mcp-reconciliation-mark",
+                "transaction_id": transaction_id,
+                "reconciled": True,
+            },
+        )
+        self.assertFalse(marked.is_error)
+        self.assertTrue(marked.structured_content["changed"])
+        searched = self.call(
+            "search_transactions", {"reconciliation_status": "reconciled"}
+        )
+        self.assertFalse(searched.is_error)
+        self.assertEqual(searched.structured_content["count"], 1)
+        invalid_boolean = self.call(
+            "set_transaction_reconciliation",
+            {
+                "request_id": "mcp-reconciliation-invalid",
+                "transaction_id": transaction_id,
+                "reconciled": {"yes": True},
+            },
+        )
+        self.assertTrue(invalid_boolean.is_error)
 
     def test_unlinked_refund_requires_member_and_category(self) -> None:
         rejected = self.call(

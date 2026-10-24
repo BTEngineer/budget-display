@@ -298,6 +298,7 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         request_id: str | None = None,
         operation_type: str = "all",
         status: str = "active",
+        reconciliation_status: str = "all",
         sort_order: str = "descending",
         limit: int = 50,
         cursor: str | None = None,
@@ -322,9 +323,27 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
             request_id=request_id,
             operation_type=operation_type,
             status=status,
+            reconciliation_status=reconciliation_status,
             sort_order=sort_order,
             limit=limit,
             cursor=cursor,
+        )
+
+    @server.tool()
+    def set_transaction_reconciliation(
+        request_id: str,
+        transaction_id: str,
+        reconciled: bool,
+    ) -> dict[str, Any]:
+        """Mark a posted card transaction as reconciled or unreconciled.
+
+        Use a stable source request ID. Split allocations are always updated
+        together. Internal reversal entries are not valid targets.
+        """
+        return ready_ledger().set_transaction_reconciliation(
+            request_id=request_id,
+            transaction_id=transaction_id,
+            reconciled=reconciled,
         )
 
     @server.tool()

@@ -3,17 +3,15 @@
 This app hosts the household SQLite ledger and its narrow MCP interface on Home
 Assistant OS.
 
-For the versioned 13-command tool contract, see the
-[Household Budget MCP 0.9.1 reference](../docs/household-budget-mcp-0.9.1.md).
+For the versioned 14-command tool contract, see the
+[Household Budget MCP 0.10.0 reference](docs/household-budget-mcp-0.10.0.md).
 
 ## Release status
 
-Version 0.9.2 is the current app package. It retains the version 0.9.1
-thirteen-tool protocol while adding the stable Supervisor-internal hostname to
-the default Host allowlist for the Home Assistant dashboard. Version 0.9.1
-introduced exact large-expense confirmations, audit-preserving corrections,
-atomic split expenses, read-only classification suggestions, server-calculated
-budget outlooks, and the P1 hardening described below.
+Version 0.10.0 is the current development app package. It adds manual,
+audit-preserving transaction reconciliation and retains the prior correction,
+split, refund, classification, outlook, dashboard-host, and monetary-state
+behavior.
 
 ## Configuration
 
@@ -47,7 +45,7 @@ Terms match at lexical boundaries rather than arbitrary substrings.
 
 The endpoint is `http://<home-assistant-address>:8099/mcp`. Configure the MCP
 client with the same token as an `Authorization: Bearer ...` header. Keep the
-thirteen-tool allowlist in `hermes-config.example.yaml`.
+fourteen-tool allowlist in `hermes-config.example.yaml`.
 
 The same listener exposes `/api/v1` for the Household Budget custom integration.
 It uses the same bearer token and Host allowlist. The API is intentionally
@@ -97,7 +95,7 @@ solely because the two boundaries applied different limits.
 
 ## MCP tool surface
 
-The MCP server exposes thirteen tools:
+The MCP server exposes fourteen tools:
 
 - `prepare_expense`
 - `add_expense`
@@ -111,6 +109,7 @@ The MCP server exposes thirteen tools:
 - `get_budget_outlook`
 - `undo_last_expense`
 - `search_transactions`
+- `set_transaction_reconciliation`
 - `refund_expense`
 
 It does not expose arbitrary SQL, filesystem, shell, deletion, or budget
@@ -220,6 +219,7 @@ The record includes:
 - occurrence timestamp and server-recorded timestamp as ISO 8601 values with
   timezone offsets;
 - explicit active or reversed status;
+- explicit reconciled state and the latest reconciliation timestamp;
 - original, reversal, and refund relationship IDs as applicable;
 - total refunded and remaining refundable amounts for expenses;
 - linked or unlinked status for refunds.
@@ -246,6 +246,8 @@ reconciliation. It accepts these optional filters:
 - `transaction_id` and `request_id`: exact opaque identifier matches.
 - `operation_type`: `expense`, `refund`, `reversal`, or `all`.
 - `status`: `active`, `reversed`, or `all`, defaulting to `active`.
+- `reconciliation_status`: `all`, `reconciled`, or `unreconciled`, defaulting
+  to `all` so existing searches keep returning the same records.
 - `sort_order`: `ascending` or `descending`. Interactive recent searches
   default to descending; reconciliation requests ascending order explicitly.
 - `limit`: 1 through 200, defaulting to 50.
@@ -268,6 +270,26 @@ and include each expense's remaining refundable amount. For complete journal
 reconciliation, a Hermes client should use explicit calendar boundaries,
 `status: all`, ascending order, a bounded page size, and follow every cursor
 before treating the period as complete.
+
+### `set_transaction_reconciliation`
+
+This authenticated write tool accepts a unique `request_id`, a stable
+`transaction_id`, and a boolean `reconciled` value. Expenses and refunds are
+valid targets. Internal reversal entries are rejected. If the target belongs
+to a split expense, every allocation in that split is marked together in one
+immediate SQLite transaction.
+
+The operation writes only to additive reconciliation history tables; it never
+updates, deletes, or rebuilds `ledger_entries`. A repeated request ID with the
+same target and state returns the original result with `duplicate: true`.
+Conflicting reuse fails closed. A new request that repeats the current state is
+still audited and returns `changed: false`.
+
+Current state is the latest reconciliation operation for an entry. Existing
+and corrected replacement transactions have no operation and therefore begin
+unreconciled. Refunds are reconciled separately from their original expense.
+Undo preserves an original expense's reconciliation history but creates an
+internal reversal that cannot itself be reconciled.
 
 ### `refund_expense`
 
@@ -336,8 +358,8 @@ work. Queries, limits, identifiers, and cursors are bounded; malformed or
 tampered cursors fail closed. Normal logs must not contain complete transaction
 histories, bearer values, or credential-bearing exception details.
 
-The version 0.9.1 server and `hermes-config.example.yaml` define the exact
-thirteen-tool development allowlist. A live Hermes deployment must not adopt that
+The version 0.10.0 server and `hermes-config.example.yaml` define the exact
+fourteen-tool development allowlist. A live Hermes deployment must not adopt that
 allowlist until this branch is reviewed and deployed. Resources, prompts, and
 parallel tool calls remain disabled.
 
@@ -353,8 +375,14 @@ without deleting ledger history.
 The schema includes a unique transaction-ID index, an occurrence-time plus
 transaction-ID search-order index, and a refund-relationship index. Search uses
 keyset pagination rather than a mutable offset. Member, category,
-operation/status, amount, ID, and literal business or description filters are
-applied to the authoritative ledger query.
+operation/status, reconciliation state, amount, ID, and literal business or
+description filters are applied to the authoritative ledger query.
+
+Reconciliation uses two additive tables: one immutable operation row per
+request and a target link for each affected ledger entry. Startup creates and
+validates those tables, foreign keys, and the lookup index in a separate
+immediate transaction. Existing ledger rows are not backfilled or altered, and
+an older application version safely ignores the new tables.
 
 The existing one-reversal-per-expense relationship remains valid for undo,
 while the refund relationship permits multiple partial refunds. Aggregate
@@ -363,13 +391,14 @@ member, and parent/child category totals.
 
 ### Validation status
 
-The version 0.9.2 source suite passes 74 automated tests. P1 regression
-coverage includes large-correction preparation and mutation rejection, the
-exact $500 correction boundary, concrete single/split occurrence timestamps,
-month-boundary preservation, historical outlooks before and after a correction,
-and fail-closed split-allocation correction. Existing coverage continues to
-exercise atomic balanced splits, idempotency, classification, refunds, search,
-authentication, and the complete thirteen-tool MCP contract.
+The version 0.10.0 source suite passes 84 automated tests. Reconciliation
+coverage includes additive and partial-schema migration, ledger-row
+preservation, default unreconciled state, marking, unmarking, exact and
+conflicting retries, audited no-ops, split atomicity, refunds, reversal
+rejection, correction replacement behavior, filter-bound pagination,
+concurrent writes, rollback, foreign keys, and the complete fourteen-tool MCP
+contract. Existing correction, split, classification, refund, search,
+authentication, receipt, dashboard API, MQTT, and monetary tests remain green.
 
 P2 regression coverage verifies the shared 1,000-character prepare/commit
 description boundary, lexical alias matching, one classification-history sample
@@ -406,12 +435,10 @@ cleanup procedure.
 
 ### Delivery status and operational boundary
 
-Version 0.9.1 was reviewed, merged to `main` through pull request #5, tagged,
-and released. Version 0.9.2 is the packaging/configuration follow-up proposed
-through pull request #6. Source delivery does not itself deploy or restart the
-live Home Assistant app, alter Hermes configuration, rotate credentials, or
-perform live financial mutations. Those remain separately controlled
-operational actions.
+Version 0.10.0 is implemented on its development branch but is not deployed by
+source delivery. This work does not restart the live Home Assistant app, alter
+the live Hermes allowlist, rotate credentials, or perform live financial
+mutations. Those remain separately controlled operational actions.
 
 ## Persistence and backup
 

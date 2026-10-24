@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=84.0.0"]
+requires = ["setuptools>=83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "budget-display"
-version = "0.9.3"
+version = "0.10.0"
 description = "Local household budget ledger for the Hermes and reTerminal E1001 project"
 requires-python = ">=3.11"
 dependencies = ["mcp>=2,<3", "paho-mqtt>=2,<3", "tzdata>=2025.2"]
