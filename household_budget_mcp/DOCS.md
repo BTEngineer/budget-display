@@ -3,15 +3,24 @@
 This app hosts the household SQLite ledger and its narrow MCP interface on Home
 Assistant OS.
 
-For the versioned 14-command tool contract, see the
+For the original fourteen-command contract, see the
 [Household Budget MCP 0.10.0 reference](docs/household-budget-mcp-0.10.0.md).
+The [0.11.0 Christmas reference](docs/christmas-spending-mcp-0.11.0.md) adds
+seven Christmas-only tools, bringing the MCP surface to twenty-one tools.
 
 ## Release status
 
-Version 0.10.0 is the current development app package. It adds manual,
-audit-preserving transaction reconciliation and retains the prior correction,
-split, refund, classification, outlook, dashboard-host, and monetary-state
-behavior.
+Version 0.11.0 adds annual Christmas
+budgets and recipient gift-value comparisons as audited attribution over existing
+purchases, retaining ordinary monthly financial and receipt behavior. Christmas
+attribution requires a specific user request and `explicitly_requested: true`;
+receipt content, dates, merchants, and classification suggestions never supply
+that intent. See the versioned Christmas reference for setup, allocation, and
+refund examples.
+
+The test suite covers original-table preservation and synthetic older-code
+compatibility. Source tests do not replace operational backup and deployment
+checks.
 
 ## Configuration
 
@@ -45,7 +54,7 @@ Terms match at lexical boundaries rather than arbitrary substrings.
 
 The endpoint is `http://<home-assistant-address>:8099/mcp`. Configure the MCP
 client with the same token as an `Authorization: Bearer ...` header. Keep the
-fourteen-tool allowlist in `hermes-config.example.yaml`.
+twenty-one-tool allowlist in `hermes-config.example.yaml` when deploying 0.11.0.
 
 The same listener exposes `/api/v1` for the Household Budget custom integration.
 It uses the same bearer token and Host allowlist. The API is intentionally
@@ -95,7 +104,7 @@ solely because the two boundaries applied different limits.
 
 ## MCP tool surface
 
-The MCP server exposes fourteen tools:
+The MCP server retains these fourteen tools:
 
 - `prepare_expense`
 - `add_expense`
@@ -112,8 +121,22 @@ The MCP server exposes fourteen tools:
 - `set_transaction_reconciliation`
 - `refund_expense`
 
-It does not expose arbitrary SQL, filesystem, shell, deletion, or budget
-configuration tools.
+Version 0.11.0 also exposes:
+
+- `upsert_christmas_recipient`
+- `list_christmas_recipients`
+- `configure_christmas_year`
+- `set_christmas_attribution`
+- `set_christmas_refund_attribution`
+- `get_christmas_summary`
+- `list_christmas_attributions`
+
+It does not expose arbitrary SQL, filesystem, shell, deletion, or general
+monthly-budget configuration tools. Annual-limit configuration is restricted
+to the Christmas tools. Ordinary expense and receipt operations never call
+Christmas attribution. Use a separate idempotency request ID for each financial
+operation and its Christmas attribution, so a failed or retried attribution
+cannot duplicate the original expense.
 
 ## Version 0.9 operations
 
@@ -358,10 +381,12 @@ work. Queries, limits, identifiers, and cursors are bounded; malformed or
 tampered cursors fail closed. Normal logs must not contain complete transaction
 histories, bearer values, or credential-bearing exception details.
 
-The version 0.10.0 server and `hermes-config.example.yaml` define the exact
-fourteen-tool development allowlist. A live Hermes deployment must not adopt that
-allowlist until this branch is reviewed and deployed. Resources, prompts, and
-parallel tool calls remain disabled.
+The version 0.10.0 reference records its original fourteen-tool allowlist.
+The current `hermes-config.example.yaml` includes all twenty-one 0.11.0 tools;
+update a live client only alongside deployment of the matching server.
+Resources, prompts, and parallel tool calls remain disabled. Christmas
+attribution tools are used only for a specific user request, never because
+receipt text or a category suggestion looks seasonal.
 
 ### Persistence and query implementation
 
@@ -435,10 +460,9 @@ cleanup procedure.
 
 ### Delivery status and operational boundary
 
-Version 0.10.0 is implemented on its development branch but is not deployed by
-source delivery. This work does not restart the live Home Assistant app, alter
-the live Hermes allowlist, rotate credentials, or perform live financial
-mutations. Those remain separately controlled operational actions.
+Publishing source, updating an installed Home Assistant app, and changing a
+running Hermes allowlist are separate operational steps. Source delivery
+does not rotate credentials or authorize financial mutations.
 
 ## Persistence and backup
 

@@ -1,7 +1,7 @@
 """Narrow stdio MCP boundary for Hermes budget operations.
 
-This server intentionally exposes no arbitrary SQL, filesystem, shell, budget
-configuration, or deletion tools.
+This server intentionally exposes no arbitrary SQL, filesystem, shell, general
+budget configuration, or deletion tools. Christmas attribution is opt-in only.
 """
 
 from __future__ import annotations
@@ -12,12 +12,14 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server import MCPServer
+from pydantic import StrictBool
 
 from .ledger import (
     BudgetLedger,
     BudgetValidationError,
     MAX_ENTRY_DESCRIPTION_LENGTH,
 )
+from .christmas import ChristmasLedger
 
 
 MAX_REQUEST_ID_LENGTH = 200
@@ -108,6 +110,11 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         in description. Expenses over $500 require a token from prepare_expense
         that matches the exact payload. occurred_at must be an ISO 8601
         timestamp with timezone when supplied.
+
+        Ordinary expenses are never automatically Christmas spending. Do not
+        infer Christmas intent from a receipt, date, merchant, item description,
+        or suggested category, or ask unsolicited Christmas questions. Only
+        use set_christmas_attribution after the user specifically requests it.
         """
         clean_request_id = _validate_bounded_text(
             request_id, name="request_id", maximum=MAX_REQUEST_ID_LENGTH
@@ -224,6 +231,9 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
 
         Each allocation needs member, category, and positive decimal amount.
         Allocations must add up exactly to total_amount or nothing is recorded.
+        Never infer Christmas intent or ask Christmas questions for ordinary
+        receipts. Explicitly requested Christmas details are assigned separately
+        through set_christmas_attribution without posting another expense.
         """
         return ready_ledger().add_split_expense(
             request_id=request_id,
@@ -256,6 +266,8 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
 
         Suggestions are read-only evidence. The caller must still supply an
         explicit category to a write tool.
+        A suggestion never supplies Christmas intent. Do not infer Christmas
+        attribution or ask unsolicited Christmas questions from these results.
         """
         return ready_ledger().suggest_expense_classification(
             business_name=business_name,
@@ -387,6 +399,164 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
             business_name=clean_business_name,
             description=clean_description,
             occurred_at=occurred_at,
+        )
+
+    @server.tool()
+    def upsert_christmas_recipient(
+        request_id: str,
+        name: str,
+        recipient_id: str | None = None,
+        active: bool = True,
+    ) -> dict[str, Any]:
+        """Create or update a reusable Christmas gift recipient.
+
+        A recipient identifies who receives a gift, independently of the
+        expense's spender/member. Use the returned stable recipient_id for
+        allocations and each year's comparison group. Deactivation preserves
+        history and never rewrites previous years' groups.
+        """
+        return ChristmasLedger(ready_ledger()).upsert_recipient(
+            request_id=request_id,
+            name=name,
+            recipient_id=recipient_id,
+            active=active,
+        )
+
+    @server.tool()
+    def list_christmas_recipients(
+        include_inactive: bool = False,
+    ) -> dict[str, Any]:
+        """List reusable gift recipients and their stable recipient IDs."""
+        return ChristmasLedger(ready_ledger()).list_recipients(
+            include_inactive=include_inactive,
+        )
+
+    @server.tool()
+    def configure_christmas_year(
+        request_id: str,
+        year: int,
+        child_recipient_ids: list[str] | None = None,
+        budget_amount: str | None = None,
+        clear_budget: bool = False,
+    ) -> dict[str, Any]:
+        """Set a Christmas year's annual limit or child comparison group.
+
+        Supply only the settings being changed. budget_amount is a decimal
+        amount; clear_budget removes the limit, showing it as not set rather
+        than zero. Changes are audited and target only the specified year.
+        No automatic rollover or general monthly-budget changes are performed.
+        An unset or exceeded limit never prevents recording actual purchases.
+        """
+        return ChristmasLedger(ready_ledger()).configure_year(
+            request_id=request_id,
+            year=year,
+            child_recipient_ids=child_recipient_ids,
+            budget_amount=budget_amount,
+            clear_budget=clear_budget,
+        )
+
+    @server.tool()
+    def set_christmas_attribution(
+        request_id: str,
+        transaction_id: str,
+        gifts: list[dict[str, Any]],
+        explicitly_requested: StrictBool,
+        overhead_amount: str = "0.00",
+        ordinary_amount: str | None = None,
+        year: int | None = None,
+    ) -> dict[str, Any]:
+        """Assign Christmas details only after a specific user request.
+
+        NEVER infer Christmas intent from receipt uploads or extraction, dates,
+        merchants, item descriptions, or suggested categories. Do not ask
+        unsolicited Christmas questions for ordinary purchases. Set
+        explicitly_requested=true only when the user specifically asks to
+        track this purchase or identified group of purchases for Christmas;
+        their explicit instruction already supplies opt-in.
+
+        Record the expense normally first, then target its transaction_id (or
+        split purchase/group ID). This audited assignment does not post another
+        financial expense and may correct existing attribution. year defaults
+        to the purchase's local year on first explicit assignment; on edits an
+        omitted year preserves its existing intended Christmas year.
+
+        Each gift has description and positive decimal amount, an optional
+        gift_id to retain on edits, and either recipient_ids for equal shares
+        or recipient_amounts=[{recipient_id, amount}] for exact custom shares.
+        Omit recipients for a visibly unassigned gift. Tax, shipping, wrapping,
+        and other Christmas costs belong in overhead_amount, not gift value.
+        ordinary_amount is the non-Christmas remainder; portions must reconcile
+        to the purchase. An empty gifts list allows overhead-only attribution
+        or removal of previous attribution when all money is ordinary.
+        """
+        return ChristmasLedger(ready_ledger()).assign_purchase(
+            request_id=request_id,
+            transaction_id=transaction_id,
+            gifts=gifts,
+            explicitly_requested=explicitly_requested,
+            overhead_amount=overhead_amount,
+            ordinary_amount=ordinary_amount,
+            year=year,
+        )
+
+    @server.tool()
+    def set_christmas_refund_attribution(
+        request_id: str,
+        transaction_id: str,
+        gifts: list[dict[str, Any]],
+        explicitly_requested: StrictBool,
+        overhead_amount: str = "0.00",
+        ordinary_amount: str = "0.00",
+    ) -> dict[str, Any]:
+        """Resolve a linked refund's Christmas breakdown on explicit request.
+
+        Target the refund's transaction_id. Each gifts item contains the
+        original gift_id and positive decimal amount refunded for that gift.
+        Put refunded tax/shipping/wrapping in overhead_amount and refunded
+        non-Christmas items in ordinary_amount; portions must equal the refund.
+        Shared gifts retain their original recipient proportions. A full
+        refund inherits the original explicit allocation; ambiguous partial
+        returns remain visibly unresolved until their breakdown is supplied.
+        Never guess Christmas intent from an ordinary refund receipt or infer
+        a partial return's gift-versus-overhead breakdown.
+        """
+        return ChristmasLedger(ready_ledger()).resolve_refund(
+            request_id=request_id,
+            transaction_id=transaction_id,
+            gifts=gifts,
+            explicitly_requested=explicitly_requested,
+            overhead_amount=overhead_amount,
+            ordinary_amount=ordinary_amount,
+        )
+
+    @server.tool()
+    def get_christmas_summary(year: int) -> dict[str, Any]:
+        """Return a server-calculated annual Christmas and gift comparison.
+
+        Includes only explicitly attributed purchases and their linked returns.
+        Ordinary or untagged receipts are never classified by this query. Show
+        unresolved/unassigned warnings with totals and comparisons; zero
+        recorded gift value does not establish that a child received no gifts.
+        Limits, remaining amounts, and gaps are informational, not write blocks.
+        """
+        return ChristmasLedger(ready_ledger()).summary(year=year)
+
+    @server.tool()
+    def list_christmas_attributions(
+        year: int,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """List bounded Christmas purchase details, allocations, and history.
+
+        Follow pagination for detail; get_christmas_summary calculates complete
+        annual totals independently of this page. Only explicit attribution is
+        included, and incomplete refund or recipient attribution stays visible.
+        """
+        return ChristmasLedger(ready_ledger()).details(
+            year=year,
+            limit=limit,
+            offset=offset,
         )
 
     return server

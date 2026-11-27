@@ -1,0 +1,39 @@
+# Merge this entry into ~/.hermes/config.yaml on the Hermes host.
+# Store BUDGET_MCP_TOKEN in ~/.hermes/.env, using the same random secret entered
+# in the Home Assistant app configuration.
+# Christmas tools require a specific user request. Never infer Christmas intent
+# from receipt uploads, item descriptions, merchant names, dates, or suggestions.
+mcp_servers:
+  household_budget:
+    url: "http://homeassistant.local:8099/mcp"
+    headers:
+      Authorization: "Bearer ${BUDGET_MCP_TOKEN}"
+    enabled: true
+    timeout: 30
+    connect_timeout: 10
+    supports_parallel_tool_calls: false
+    tools:
+      include:
+        - prepare_expense
+        - add_expense
+        - prepare_correction
+        - correct_expense
+        - prepare_split_expense
+        - add_split_expense
+        - list_spending
+        - list_budget_categories
+        - suggest_expense_classification
+        - get_budget_outlook
+        - undo_last_expense
+        - search_transactions
+        - set_transaction_reconciliation
+        - refund_expense
+        - upsert_christmas_recipient
+        - list_christmas_recipients
+        - configure_christmas_year
+        - set_christmas_attribution
+        - set_christmas_refund_attribution
+        - get_christmas_summary
+        - list_christmas_attributions
+      resources: false
+      prompts: false

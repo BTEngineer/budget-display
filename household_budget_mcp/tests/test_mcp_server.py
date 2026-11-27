@@ -29,7 +29,7 @@ class BudgetMCPServerTests(unittest.TestCase):
 
         return asyncio.run(invoke())
 
-    def test_exposes_only_the_fourteen_approved_tools(self) -> None:
+    def test_exposes_only_the_approved_budget_and_christmas_tools(self) -> None:
         async def list_tools() -> dict[str, dict[str, object]]:
             async with Client(self.server) as client:
                 result = await client.list_tools()
@@ -53,6 +53,13 @@ class BudgetMCPServerTests(unittest.TestCase):
                 "search_transactions",
                 "set_transaction_reconciliation",
                 "refund_expense",
+                "upsert_christmas_recipient",
+                "list_christmas_recipients",
+                "configure_christmas_year",
+                "set_christmas_attribution",
+                "set_christmas_refund_attribution",
+                "get_christmas_summary",
+                "list_christmas_attributions",
             },
         )
         self.assertTrue(
@@ -72,6 +79,222 @@ class BudgetMCPServerTests(unittest.TestCase):
         self.assertEqual(
             set(tools["refund_expense"]["required"]), {"request_id", "amount"}
         )
+        for name in ("set_christmas_attribution", "set_christmas_refund_attribution"):
+            self.assertIn("explicitly_requested", tools[name]["required"])
+            self.assertEqual(
+                tools[name]["properties"]["explicitly_requested"]["type"], "boolean"
+            )
+        self.assertNotIn("christmas", tools["add_expense"]["properties"])
+
+    def add_christmas_test_expense(self, request_id: str, amount: str = "110.00") -> str:
+        added = self.call(
+            "add_expense",
+            {
+                "request_id": request_id,
+                "member": "Member 1",
+                "category": "Everyday",
+                "amount": amount,
+                "business_name": "Christmas Toy Shop",
+                "description": "Christmas gifts and wrapping",
+                "occurred_at": "2026-12-03T12:00:00-05:00",
+            },
+        )
+        self.assertFalse(added.is_error)
+        return added.structured_content["transaction"]["transaction_id"]
+
+    def add_christmas_test_recipient(self, name: str) -> str:
+        result = self.call(
+            "upsert_christmas_recipient",
+            {"request_id": f"recipient-{name}", "name": name},
+        )
+        self.assertFalse(result.is_error)
+        return result.structured_content["recipient_id"]
+
+    def test_christmas_looking_expense_is_not_automatically_attributed(self) -> None:
+        self.add_christmas_test_expense("ordinary-december")
+        summary = self.call("get_christmas_summary", {"year": 2026})
+        self.assertFalse(summary.is_error)
+        self.assertEqual(summary.structured_content["spent_cents"], 0)
+        self.assertIsNone(summary.structured_content["budget_cents"])
+        self.assertIsNone(summary.structured_content["remaining_cents"])
+        detail = self.call("list_christmas_attributions", {"year": 2026})
+        self.assertFalse(detail.is_error)
+        self.assertEqual(detail.structured_content["attributions"], [])
+        self.assertEqual(self.ledger.list_spending(month="2026-12")["spent_cents"], 11000)
+
+    def test_christmas_explicit_opt_in_shared_gifts_and_idempotent_assignment(self) -> None:
+        transaction_id = self.add_christmas_test_expense("christmas-shared")
+        first_child = self.add_christmas_test_recipient("Child A")
+        second_child = self.add_christmas_test_recipient("Child B")
+        configured = self.call(
+            "configure_christmas_year",
+            {
+                "request_id": "christmas-cap",
+                "year": 2026,
+                "budget_amount": "100.00",
+                "child_recipient_ids": [first_child, second_child],
+            },
+        )
+        self.assertFalse(configured.is_error)
+        recipients = self.call("list_christmas_recipients", {})
+        self.assertFalse(recipients.is_error)
+        self.assertEqual(len(recipients.structured_content["recipients"]), 2)
+        arguments = {
+            "request_id": "christmas-shared-assign",
+            "transaction_id": transaction_id,
+            "gifts": [
+                {
+                    "description": "Shared gift",
+                    "amount": "100.00",
+                    "recipient_ids": [first_child, second_child],
+                }
+            ],
+            "overhead_amount": "10.00",
+        }
+        missing_opt_in = self.call("set_christmas_attribution", arguments)
+        self.assertTrue(missing_opt_in.is_error)
+        rejected = self.call(
+            "set_christmas_attribution", {**arguments, "explicitly_requested": False}
+        )
+        self.assertTrue(rejected.is_error)
+        self.assertIn("explicit", rejected.content[0].text.lower())
+        for implicit_flag in ("true", 1):
+            coerced = self.call(
+                "set_christmas_attribution",
+                {**arguments, "explicitly_requested": implicit_flag},
+            )
+            self.assertTrue(coerced.is_error)
+        unchanged = self.call("get_christmas_summary", {"year": 2026})
+        self.assertEqual(unchanged.structured_content["spent_cents"], 0)
+        accepted = self.call(
+            "set_christmas_attribution", {**arguments, "explicitly_requested": True}
+        )
+        self.assertFalse(accepted.is_error)
+        duplicate = self.call(
+            "set_christmas_attribution", {**arguments, "explicitly_requested": True}
+        )
+        self.assertFalse(duplicate.is_error)
+        self.assertTrue(duplicate.structured_content["duplicate"])
+        summary = self.call("get_christmas_summary", {"year": 2026}).structured_content
+        self.assertEqual(summary["spent_cents"], 11000)
+        self.assertEqual(summary["remaining_cents"], -1000)
+        self.assertEqual(summary["overspent_cents"], 1000)
+        self.assertEqual(summary["by_recipient_cents"], {first_child: 5000, second_child: 5000})
+        self.assertTrue(summary["comparison_complete"])
+        self.assertEqual([child["gap_to_highest_cents"] for child in summary["child_totals"]], [0, 0])
+        self.assertEqual(self.ledger.list_spending(month="2026-12")["spent_cents"], 11000)
+
+    def test_christmas_mixed_receipt_missing_recipient_and_audited_correction(self) -> None:
+        transaction_id = self.add_christmas_test_expense("christmas-mixed", "70.00")
+        child = self.add_christmas_test_recipient("Child A")
+        self.call(
+            "configure_christmas_year",
+            {"request_id": "mixed-group", "year": 2026, "child_recipient_ids": [child]},
+        )
+        initial = self.call(
+            "set_christmas_attribution",
+            {
+                "request_id": "mixed-assign",
+                "transaction_id": transaction_id,
+                "gifts": [{"description": "Gift awaiting recipient", "amount": "20.00"}],
+                "overhead_amount": "10.00",
+                "ordinary_amount": "40.00",
+                "explicitly_requested": True,
+            },
+        )
+        self.assertFalse(initial.is_error)
+        incomplete = self.call("get_christmas_summary", {"year": 2026}).structured_content
+        self.assertEqual(incomplete["spent_cents"], 3000)
+        self.assertEqual(incomplete["unassigned_gift_cents"], 2000)
+        self.assertFalse(incomplete["comparison_complete"])
+        gift_id = initial.structured_content["gifts"][0]["gift_id"]
+        corrected = self.call(
+            "set_christmas_attribution",
+            {
+                "request_id": "mixed-recipient-correction",
+                "transaction_id": transaction_id,
+                "gifts": [{"gift_id": gift_id, "description": "Gift", "amount": "20.00", "recipient_ids": [child]}],
+                "overhead_amount": "10.00",
+                "ordinary_amount": "40.00",
+                "explicitly_requested": True,
+            },
+        )
+        self.assertFalse(corrected.is_error)
+        complete = self.call("get_christmas_summary", {"year": 2026}).structured_content
+        self.assertEqual(complete["by_recipient_cents"][child], 2000)
+        self.assertEqual(complete["unassigned_gift_cents"], 0)
+        self.assertTrue(complete["comparison_complete"])
+        details = self.call("list_christmas_attributions", {"year": 2026, "limit": 1}).structured_content
+        self.assertEqual(len(details["attributions"]), 1)
+        history = self.call("list_christmas_attributions", {"year": 2026}).structured_content
+        self.assertGreaterEqual(len(history["history"]), 2)
+        transactions = self.call("search_transactions", {}).structured_content
+        self.assertEqual(transactions["count"], 1)
+
+    def test_christmas_partial_and_full_refunds_preserve_original_year(self) -> None:
+        transaction_id = self.add_christmas_test_expense("christmas-refund")
+        child = self.add_christmas_test_recipient("Child A")
+        self.call(
+            "configure_christmas_year",
+            {"request_id": "refund-group", "year": 2026, "child_recipient_ids": [child]},
+        )
+        assigned = self.call(
+            "set_christmas_attribution",
+            {
+                "request_id": "refund-assign",
+                "transaction_id": transaction_id,
+                "gifts": [{"description": "Gift", "amount": "100.00", "recipient_ids": [child]}],
+                "overhead_amount": "10.00",
+                "explicitly_requested": True,
+            },
+        )
+        self.assertFalse(assigned.is_error)
+        refund = self.call(
+            "refund_expense",
+            {
+                "request_id": "christmas-partial-refund",
+                "expense_id": transaction_id,
+                "amount": "21.00",
+                "occurred_at": "2027-01-03T12:00:00-05:00",
+            },
+        )
+        self.assertFalse(refund.is_error)
+        unresolved = self.call("get_christmas_summary", {"year": 2026}).structured_content
+        self.assertFalse(unresolved["comparison_complete"])
+        self.assertEqual(unresolved["spent_cents"], 8900)
+        self.assertTrue(unresolved["spending_complete"])
+        self.assertEqual(unresolved["unresolved_refund_cents"], 2100)
+        resolved = self.call(
+            "set_christmas_refund_attribution",
+            {
+                "request_id": "christmas-partial-resolve",
+                "transaction_id": refund.structured_content["transaction"]["transaction_id"],
+                "gifts": [{"gift_id": assigned.structured_content["gifts"][0]["gift_id"], "amount": "20.00"}],
+                "overhead_amount": "1.00",
+                "explicitly_requested": True,
+            },
+        )
+        self.assertFalse(resolved.is_error)
+        net = self.call("get_christmas_summary", {"year": 2026}).structured_content
+        self.assertEqual(net["spent_cents"], 8900)
+        self.assertEqual(net["by_recipient_cents"][child], 8000)
+        self.assertTrue(net["comparison_complete"])
+        rest = self.call(
+            "refund_expense",
+            {
+                "request_id": "christmas-final-refund",
+                "expense_id": transaction_id,
+                "amount": "89.00",
+                "occurred_at": "2027-01-04T12:00:00-05:00",
+            },
+        )
+        self.assertFalse(rest.is_error)
+        empty = self.call("get_christmas_summary", {"year": 2026}).structured_content
+        self.assertEqual(empty["spent_cents"], 0)
+        self.assertEqual(empty["by_recipient_cents"][child], 0)
+        next_year = self.call("get_christmas_summary", {"year": 2027}).structured_content
+        self.assertEqual(next_year["spent_cents"], 0)
+        self.assertEqual(self.ledger.list_spending(month="2027-01")["spent_cents"], -11000)
 
     def test_add_and_list_round_trip_through_mcp(self) -> None:
         added = self.call(

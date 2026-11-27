@@ -398,6 +398,9 @@ class BudgetLedger:
                     )
             connection.commit()
             self._initialize_reconciliation_schema(connection)
+            from .christmas import initialize_christmas_schema
+
+            initialize_christmas_schema(connection)
 
     def register_receipt(
         self,

@@ -54,6 +54,22 @@ class BudgetMCPHTTPTests(unittest.TestCase):
             headers["Authorization"] = f"Bearer {token}"
         return self.client.post("/mcp", headers=headers, json=INITIALIZE)
 
+    def call_tool(self, name: str, arguments: dict[str, object], token: str = TOKEN):
+        return self.client.post(
+            "/mcp",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            },
+        )
+
     def test_missing_token_is_rejected(self) -> None:
         self.assertEqual(self.post(None).status_code, 401)
 
@@ -64,6 +80,27 @@ class BudgetMCPHTTPTests(unittest.TestCase):
         response = self.post(TOKEN)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["result"]["serverInfo"]["name"], "Household Budget")
+
+    def test_christmas_tools_use_existing_http_auth_and_require_explicit_request(self) -> None:
+        self.assertEqual(
+            self.call_tool("get_christmas_summary", {"year": 2026}, token="wrong").status_code,
+            401,
+        )
+        self.assertEqual(self.post(TOKEN).status_code, 200)
+        summary = self.call_tool("get_christmas_summary", {"year": 2026})
+        self.assertEqual(summary.status_code, 200)
+        self.assertEqual(summary.json()["result"]["structuredContent"]["spent_cents"], 0)
+        rejected = self.call_tool(
+            "set_christmas_attribution",
+            {
+                "request_id": "http-no-christmas-opt-in",
+                "transaction_id": "unverified",
+                "gifts": [],
+                "explicitly_requested": False,
+            },
+        )
+        self.assertEqual(rejected.status_code, 200)
+        self.assertTrue(rejected.json()["result"]["isError"])
 
     def test_wrong_host_is_rejected_even_with_valid_token(self) -> None:
         response = self.client.post(
@@ -148,6 +185,54 @@ class BudgetMCPHTTPTests(unittest.TestCase):
         self.assertEqual(duplicate.status_code, 200)
         self.assertEqual(duplicate.json()["draft"]["status"], "confirmed")
         self.assertEqual(list(receipt_directory.glob("*")), [])
+
+    def test_holiday_receipt_extraction_never_assigns_christmas(self) -> None:
+        upload = self.client.post(
+            "/api/v1/receipts",
+            headers={
+                "Authorization": f"Bearer {TOKEN}",
+                "Content-Type": "image/png",
+                "X-Receipt-Filename": "christmas-toys.png",
+            },
+            content=b"\x89PNG\r\n\x1a\nholiday receipt",
+        )
+        self.assertEqual(upload.status_code, 201)
+        draft_id = upload.json()["draft"]["id"]
+        auth = {"Authorization": f"Bearer {TOKEN}"}
+        analysis = self.client.post(
+            f"/api/v1/receipts/{draft_id}/analysis",
+            headers=auth,
+            json={
+                "ai_entity_id": "ai_task.openai",
+                "fields": {
+                    "merchant": "Christmas Toy Shop",
+                    "occurred_on": "2026-12-03",
+                    "total": "50.00",
+                    "notes": "Christmas gifts and wrapping",
+                },
+            },
+        )
+        self.assertEqual(analysis.status_code, 200)
+        confirmed = self.client.post(
+            f"/api/v1/receipts/{draft_id}/confirm",
+            headers=auth,
+            json={
+                "request_id": "ordinary-holiday-receipt",
+                "member": "Member 1",
+                "category": "Everyday",
+                "amount": "50.00",
+                "occurred_on": "2026-12-03",
+                "business_name": "Christmas Toy Shop",
+                "description": "Christmas gifts and wrapping",
+            },
+        )
+        self.assertEqual(confirmed.status_code, 201)
+        self.assertEqual(self.post(TOKEN).status_code, 200)
+        summary = self.call_tool("get_christmas_summary", {"year": 2026})
+        self.assertEqual(summary.status_code, 200)
+        self.assertEqual(summary.json()["result"]["structuredContent"]["spent_cents"], 0)
+        details = self.call_tool("list_christmas_attributions", {"year": 2026})
+        self.assertEqual(details.json()["result"]["structuredContent"]["attributions"], [])
 
     def test_large_expense_requires_explicit_confirmation(self) -> None:
         response = self.client.post(
