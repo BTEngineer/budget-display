@@ -25,6 +25,7 @@ def _parser() -> argparse.ArgumentParser:
     add.add_argument("--business-name", default="")
     add.add_argument("--description", default="")
     add.add_argument("--occurred-at")
+    add.add_argument("--explicitly-requested-christmas", action="store_true")
 
     undo = commands.add_parser("undo")
     undo.add_argument("--request-id", required=True)
@@ -62,6 +63,7 @@ def main() -> int:
                 business_name=args.business_name,
                 description=args.description,
                 occurred_at=args.occurred_at,
+                explicitly_requested_christmas=args.explicitly_requested_christmas,
             )
         elif args.command == "undo":
             result = ledger.undo_last_expense(

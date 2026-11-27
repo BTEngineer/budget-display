@@ -346,6 +346,32 @@ class BudgetMCPServerTests(unittest.TestCase):
         self.assertFalse(accepted.is_error)
         self.assertEqual(accepted.structured_content["amount_cents"], 60000)
 
+    def test_christmas_payment_requires_strict_intent_and_exact_confirmed_payload(self):
+        values = {
+            "request_id": "explicit-christmas-payment",
+            "member": "Member 1",
+            "category": "Christmas",
+            "amount": "500.01",
+            "occurred_at": "2026-12-03T10:00:00-05:00",
+        }
+        for intent in ({}, {"explicitly_requested_christmas": False},
+                       {"explicitly_requested_christmas": "true"}):
+            self.assertTrue(self.call("prepare_expense", {**values, **intent}).is_error)
+            self.assertTrue(self.call("add_expense", {**values, **intent}).is_error)
+        explicit = {**values, "explicitly_requested_christmas": True}
+        prepared = self.call("prepare_expense", explicit)
+        self.assertFalse(prepared.is_error)
+        token = prepared.structured_content["confirmation_token"]
+        self.assertTrue(self.call("add_expense", {**values, "confirmation_token": token}).is_error)
+        commit = {**explicit, "confirmation_token": token}
+        self.assertFalse(self.call("add_expense", commit).is_error)
+        self.assertTrue(self.call("add_expense", commit).structured_content["duplicate"])
+        self.assertTrue(self.call("add_expense", {**values, "confirmation_token": token}).is_error)
+        result = self.call("list_spending", {"month": "2026-12"}).structured_content
+        self.assertEqual(result["spent_cents"], 50001)
+        self.assertEqual(result["allowance_spent_cents"], 0)
+        self.assertEqual(result["outside_allowance_spent_cents"], 50001)
+
     def test_prepare_and_commit_share_the_description_limit(self) -> None:
         arguments = {
             "request_id": "description-limit",

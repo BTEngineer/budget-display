@@ -1,5 +1,9 @@
 # Christmas spending MCP 0.11.0
 
+This reference records the deployed 0.11.0 contract. See the
+[0.12.0 Christmas category reference](christmas-category-mcp-0.12.0.md)
+for the category and allowance changes in local source.
+
 Version 0.11.0 adds seven tools to the original fourteen-tool MCP surface.
 Christmas records are audited attribution over the existing ledger, not another
 financial ledger. Existing expense, receipt, reconciliation, category, and
@@ -48,6 +52,11 @@ a stable `recipient_id`. Omit the ID for creation; supply it to rename an
 existing recipient. Names are unique ignoring SQLite's case-insensitive name
 comparison. The registry is bounded to 100 recipients. Recipients are separate
 from the household member who paid for an expense.
+
+Recipients can be anyone, including extended family and friends. Create them
+with the same recipient tool and use their IDs in each gift's `recipient_ids`
+or `recipient_amounts`. The year's `child_recipient_ids` only selects the equality
+comparison group; it does not restrict who can receive a recorded gift.
 
 `list_christmas_recipients(include_inactive=false)` returns `recipients`.
 Deactivation preserves historical attribution.
@@ -162,6 +171,14 @@ Christmas spending while preserving all financial and attribution history.
 `child_totals`, `by_recipient_cents`, `unassigned_gift_cents`,
 `unresolved_refund_cents`, `comparison_complete`, and `warnings`.
 
+`by_recipient_cents` reports net gift-item value for all assigned recipients,
+including extended family outside the child comparison group. Match its IDs to
+names from `list_christmas_recipients`; use `include_inactive=true` for historical
+recipients. Recipients outside the group with no assigned gifts may be absent.
+`child_totals` is only the selected children's equality comparison, not the full
+family spending list. Per-person gift values exclude tax, shipping, and wrapping;
+those costs remain part of overall Christmas spending.
+
 Show warnings alongside amounts. Each selected child appears even with zero
 recorded gift value; that zero does not prove the child received no gifts.
 Complete child comparisons include `gift_value_cents` and
@@ -178,6 +195,33 @@ leaves remaining/overspent values null.
 flags are false. Totals must come from `get_christmas_summary`, never by adding
 one detail page. Read operations use a single SQLite snapshot.
 
+## Home Assistant Christmas tab
+
+The Household Budget integration 0.9.0 provides a dedicated read-only Christmas
+2026 tab. It displays the annual limit, recorded spending and remaining amount,
+gift values for children, extended family and other recipients, and the selected
+child comparison group. It preserves warnings and unresolved amounts instead
+of displaying missing values as zero. The tab creates no recipients or gift
+attribution; purchase entry and explicit Christmas assignment continue through
+Budget MCP. Planned gifts and wish lists remain deferred.
+
+The card reads `GET /api/household_budget/christmas?year=2026` through Home
+Assistant authentication. This administrator-only view uses the integration's
+existing server-side bearer credential to call only `get_christmas_summary`
+and `list_christmas_recipients` on the existing stateless MCP endpoint. The
+response is `{summary, recipients}`: original server-calculated totals plus the
+recipient registry, including inactive recipients for historical names. The
+dashboard configuration contains no Budget MCP credential.
+
+This Home Assistant integration and dashboard are managed separately from the
+MCP 0.11.0 server release. The explicit-request rule for Christmas attribution
+and ordinary receipt behavior continue to apply.
+
+API/source acceptance verified the tab configuration, static module serving,
+and the installed proxy invoked directly against the live MCP service. It
+also checked the HTTP authentication gate and administrator/year validation.
+Authenticated browser interaction and visual layout remain unverified.
+
 ## Storage, compatibility, and release scope
 
 Five additive `christmas_*` tables store recipients, yearly settings, current
@@ -188,5 +232,5 @@ Christmas assumptions. Prior code ignores the additive tables.
 
 The [Hermes example](../hermes-config.example.yaml) includes all twenty-one tools,
 with resources, prompts, and parallel calls disabled. Deploying a new server and
-changing a running client's allowlist are separate operational steps. Enable
-the new client tools only with the matching deployed server.
+changing a running client's allowlist are separate operational steps. Use the
+matching deployed server before enabling new tools in a running client.

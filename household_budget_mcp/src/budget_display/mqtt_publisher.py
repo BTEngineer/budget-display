@@ -121,23 +121,34 @@ class BudgetMQTTPublisher:
         self.client.publish(
             f"{STATE_PREFIX}/status", "online", qos=1, retain=True
         )
+        allowance_spent = int(summary["allowance_spent_cents"])
         self._publish_money_sensor(
             object_id="spent_month",
-            display_name="Spent this month",
+            display_name="Allowance spent this month",
+            cents=allowance_spent,
+        )
+        self._publish_money_sensor(
+            object_id="cash_flow_spent_month",
+            display_name="Net cash outflow this month",
             cents=int(summary["spent_cents"]),
+        )
+        self._publish_money_sensor(
+            object_id="outside_allowance_spent_month",
+            display_name="Christmas net spending this month",
+            cents=int(summary["outside_allowance_spent_cents"]),
         )
         remaining = summary["remaining_cents"]
         budget = summary["budget_cents"]
         if budget is not None:
             self._publish_money_sensor(
                 object_id="budget_month",
-                display_name="Budget this month",
+                display_name="Allowance this month",
                 cents=int(budget),
             )
-            percent = round(int(summary["spent_cents"]) * 100 / int(budget), 1) if int(budget) else 0
+            percent = round(allowance_spent * 100 / int(budget), 1) if int(budget) else 0
             self._publish_number_sensor(
                 object_id="percent_used_month",
-                display_name="Budget used this month",
+                display_name="Allowance used this month",
                 value=f"{percent:.1f}",
                 unit="%",
                 state_class="measurement",
@@ -145,20 +156,21 @@ class BudgetMQTTPublisher:
         if remaining is not None:
             self._publish_money_sensor(
                 object_id="remaining_month",
-                display_name="Remaining this month",
+                display_name="Allowance remaining this month",
                 cents=int(remaining),
             )
-        by_member = summary["by_member_cents"]
+        if budget is None:
+            for object_id in ("budget_month", "percent_used_month", "remaining_month"):
+                self._clear_retained_sensor(object_id)
+        by_member = summary["allowance_by_member_cents"]
         for index, member in enumerate(self.members, start=1):
             self._publish_money_sensor(
                 object_id=f"person_{index}_month",
-                display_name=f"{member} this month",
+                display_name=f"{member} allowance spending this month",
                 cents=int(by_member.get(member, 0)),
             )
-        category_rows = summary["category_rows"]
-        for row in category_rows:
-            if row["parent"] is not None:
-                continue
+        root_rows = [row for row in summary["category_rows"] if row["parent"] is None]
+        for row in root_rows:
             category_key = self._category_key(str(row["name"]))
             spent_cents = int(row["spent_cents"])
             budget_cents = row["budget_cents"]
@@ -187,20 +199,23 @@ class BudgetMQTTPublisher:
                     unit="%",
                     state_class="measurement",
                 )
-        if len(category_rows) > MAX_DISPLAY_CATEGORY_ROWS:
+            else:
+                for metric in ("budget", "remaining", "percent"):
+                    self._clear_retained_sensor(f"category_{category_key}_{metric}_month")
+        if len(root_rows) > MAX_DISPLAY_CATEGORY_ROWS:
             LOGGER.warning(
-                "Only the first %s budget categories fit on the E1001 display",
+                "Only the first %s root categories fit on the E1001 display",
                 MAX_DISPLAY_CATEGORY_ROWS,
             )
         for index in range(1, MAX_DISPLAY_CATEGORY_ROWS + 1):
-            if index <= len(category_rows):
-                row = category_rows[index - 1]
+            if index <= len(root_rows):
+                row = root_rows[index - 1]
                 member_totals = row["by_member_cents"]
                 budget_cents = row["budget_cents"]
                 safe_name = str(row["name"]).replace("|", " ")
                 payload = "|".join(
                     (
-                        "1" if row["parent"] is not None else "0",
+                        "0",
                         safe_name,
                         "" if budget_cents is None else f"{int(budget_cents) / 100:.2f}",
                         f"{int(member_totals.get(self.members[0], 0)) / 100:.2f}",
@@ -229,6 +244,13 @@ class BudgetMQTTPublisher:
         slug = re.sub(r"[^a-z0-9]+", "_", name.casefold()).strip("_") or "category"
         digest = hashlib.sha256(name.casefold().encode("utf-8")).hexdigest()[:8]
         return f"{slug[:40]}_{digest}"
+
+    def _clear_retained_sensor(self, object_id: str) -> None:
+        self.client.publish(
+            f"{DISCOVERY_PREFIX}/sensor/household_budget_{object_id}/config",
+            "", qos=1, retain=True,
+        )
+        self.client.publish(f"{STATE_PREFIX}/state/{object_id}", "", qos=1, retain=True)
 
     def _publish_money_sensor(
         self, *, object_id: str, display_name: str, cents: int

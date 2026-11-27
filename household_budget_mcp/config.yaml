@@ -1,6 +1,6 @@
 name: "Household Budget MCP"
 description: "Private household budget ledger, HA dashboard API, and authenticated MCP endpoint"
-version: "0.11.0"
+version: "0.12.0"
 slug: "household_budget_mcp"
 url: "https://forgejo.tail246cec.ts.net/trcoo/budget-mcp"
 init: false
@@ -38,6 +38,9 @@ options:
       monthly_budget: ""
     - name: "Drinks"
       parent: "Meals"
+      monthly_budget: ""
+    - name: "Christmas"
+      parent: ""
       monthly_budget: ""
   classification_aliases:
     - term: "grocery store"

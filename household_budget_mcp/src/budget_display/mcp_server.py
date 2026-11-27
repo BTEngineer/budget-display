@@ -73,12 +73,15 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         business_name: str = "",
         description: str = "",
         occurred_at: str | None = None,
+        explicitly_requested_christmas: StrictBool = False,
     ) -> dict[str, Any]:
         """Prepare an exact expense for explicit confirmation.
 
         The returned short-lived token is bound to every supplied field. Use
         it as confirmation_token in add_expense without changing the payload.
-        This two-step flow is mandatory for expenses over $500.
+        This two-step flow is mandatory for expenses over $500. Include
+        explicitly_requested_christmas=true for a specifically requested
+        Christmas category, then keep it on the matching add_expense call.
         """
         return ready_ledger().prepare_expense(
             request_id=request_id,
@@ -88,6 +91,7 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
             business_name=business_name,
             description=description,
             occurred_at=occurred_at,
+            explicitly_requested_christmas=explicitly_requested_christmas,
         )
 
     @server.tool()
@@ -100,6 +104,7 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         description: str = "",
         occurred_at: str | None = None,
         confirmation_token: str | None = None,
+        explicitly_requested_christmas: StrictBool = False,
     ) -> dict[str, Any]:
         """Record one household expense.
 
@@ -111,10 +116,12 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         that matches the exact payload. occurred_at must be an ISO 8601
         timestamp with timezone when supplied.
 
-        Ordinary expenses are never automatically Christmas spending. Do not
-        infer Christmas intent from a receipt, date, merchant, item description,
-        or suggested category, or ask unsolicited Christmas questions. Only
-        use set_christmas_attribution after the user specifically requests it.
+        Use the Christmas category and explicitly_requested_christmas=true
+        only after the user specifically asks to record Christmas spending.
+        Do not infer intent from a receipt, date, merchant, items, history or
+        a suggestion, or ask unsolicited Christmas questions. After recording
+        the expense, set_christmas_attribution on its verified transaction ID
+        to record the Christmas year and gift/overhead details.
         """
         clean_request_id = _validate_bounded_text(
             request_id, name="request_id", maximum=MAX_REQUEST_ID_LENGTH
@@ -140,6 +147,7 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
             occurred_at=occurred_at,
             confirmation_token=confirmation_token,
             require_confirmation=True,
+            explicitly_requested_christmas=explicitly_requested_christmas,
         )
 
     @server.tool()
@@ -152,11 +160,14 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         business_name: str | None = None,
         description: str | None = None,
         occurred_at: str | None = None,
+        explicitly_requested_christmas: StrictBool = False,
     ) -> dict[str, Any]:
         """Prepare an exact correction for explicit confirmation.
 
         The returned token is required when the resolved replacement exceeds
         $500 and is bound to the target plus every resolved replacement field.
+        Set explicitly_requested_christmas when explicitly changing the
+        financial category to Christmas and keep it on the correction call.
         """
         return ready_ledger().prepare_correction(
             request_id=request_id,
@@ -167,6 +178,7 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
             business_name=business_name,
             description=description,
             occurred_at=occurred_at,
+            explicitly_requested_christmas=explicitly_requested_christmas,
         )
 
     @server.tool()
@@ -180,11 +192,14 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         description: str | None = None,
         occurred_at: str | None = None,
         confirmation_token: str | None = None,
+        explicitly_requested_christmas: StrictBool = False,
     ) -> dict[str, Any]:
         """Correct a verified expense without deleting history.
 
         Only supplied fields change. The server atomically records a linked
         reversal plus replacement. Refunded or reversed targets fail closed.
+        Set explicitly_requested_christmas when explicitly changing the
+        financial category to Christmas.
         """
         return ready_ledger().correct_expense(
             request_id=request_id,
@@ -196,6 +211,7 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
             description=description,
             occurred_at=occurred_at,
             confirmation_token=confirmation_token,
+            explicitly_requested_christmas=explicitly_requested_christmas,
         )
 
     @server.tool()
@@ -206,8 +222,13 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         business_name: str = "",
         description: str = "",
         occurred_at: str | None = None,
+        explicitly_requested_christmas: StrictBool = False,
     ) -> dict[str, Any]:
-        """Prepare an exact split expense for explicit confirmation."""
+        """Prepare an exact split expense for explicit confirmation.
+
+        A specifically requested Christmas allocation must carry
+        explicitly_requested_christmas=true on prepare and commit.
+        """
         return ready_ledger().prepare_split_expense(
             request_id=request_id,
             total_amount=total_amount,
@@ -215,6 +236,7 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
             business_name=business_name,
             description=description,
             occurred_at=occurred_at,
+            explicitly_requested_christmas=explicitly_requested_christmas,
         )
 
     @server.tool()
@@ -226,14 +248,17 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         description: str = "",
         occurred_at: str | None = None,
         confirmation_token: str | None = None,
+        explicitly_requested_christmas: StrictBool = False,
     ) -> dict[str, Any]:
         """Atomically split one purchase across people or categories.
 
         Each allocation needs member, category, and positive decimal amount.
         Allocations must add up exactly to total_amount or nothing is recorded.
         Never infer Christmas intent or ask Christmas questions for ordinary
-        receipts. Explicitly requested Christmas details are assigned separately
-        through set_christmas_attribution without posting another expense.
+        receipts. Put specifically requested Christmas portions in the
+        Christmas category with explicitly_requested_christmas=true, and leave
+        ordinary portions in their own categories. Use set_christmas_attribution
+        on the verified split purchase ID without posting another expense.
         """
         return ready_ledger().add_split_expense(
             request_id=request_id,
@@ -244,11 +269,12 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
             occurred_at=occurred_at,
             confirmation_token=confirmation_token,
             require_confirmation=True,
+            explicitly_requested_christmas=explicitly_requested_christmas,
         )
 
     @server.tool()
     def list_spending(month: str) -> dict[str, Any]:
-        """Return budget, remaining, member, and category totals for YYYY-MM."""
+        """Return ordinary monthly allowance and full monthly cash flow for YYYY-MM."""
         return ready_ledger().list_spending(month=month)
 
     @server.tool()
@@ -279,7 +305,7 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
     def get_budget_outlook(
         month: str, as_of: str | None = None
     ) -> dict[str, Any]:
-        """Return server-calculated budget pace, projection, and category risks."""
+        """Return ordinary allowance pace, projection and category risks, plus cash flow."""
         return ready_ledger().get_budget_outlook(month=month, as_of=as_of)
 
     @server.tool()
@@ -368,13 +394,16 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         business_name: str = "",
         description: str = "",
         occurred_at: str | None = None,
+        explicitly_requested_christmas: StrictBool = False,
     ) -> dict[str, Any]:
         """Record a linked or unlinked household refund.
 
         Supply expense_id from search_transactions for a verified linked
         refund. If no matching expense can be found, omit expense_id and supply
         member, category, and the exact refund amount. Full refunds use the
-        remaining_refundable_amount returned by search_transactions.
+        remaining_refundable_amount returned by search_transactions. An unlinked
+        Christmas-category refund requires explicitly_requested_christmas=true.
+        A linked refund inherits its verified expense category.
         """
         clean_request_id = _validate_bounded_text(
             request_id, name="request_id", maximum=MAX_REQUEST_ID_LENGTH
@@ -399,6 +428,7 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
             business_name=clean_business_name,
             description=clean_description,
             occurred_at=occurred_at,
+            explicitly_requested_christmas=explicitly_requested_christmas,
         )
 
     @server.tool()
@@ -474,8 +504,10 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         track this purchase or identified group of purchases for Christmas;
         their explicit instruction already supplies opt-in.
 
-        Record the expense normally first, then target its transaction_id (or
-        split purchase/group ID). This audited assignment does not post another
+        Record explicitly requested Christmas spending in the financial Christmas
+        category first, splitting any ordinary portion into its own category.
+        Then target the verified transaction or split purchase/group ID and match
+        the financial Christmas amount. This audited assignment does not post another
         financial expense and may correct existing attribution. year defaults
         to the purchase's local year on first explicit assignment; on edits an
         omitted year preserves its existing intended Christmas year.
@@ -486,8 +518,10 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
         Omit recipients for a visibly unassigned gift. Tax, shipping, wrapping,
         and other Christmas costs belong in overhead_amount, not gift value.
         ordinary_amount is the non-Christmas remainder; portions must reconcile
-        to the purchase. An empty gifts list allows overhead-only attribution
-        or removal of previous attribution when all money is ordinary.
+        to the purchase. Use an empty gifts list for overhead-only attribution.
+        To clear details, supply no gifts, zero overhead, and the full purchase
+        as ordinary_amount. Clearing does not recategorize any financial expense.
+        A remaining financial Christmas amount returns to pending attribution.
         """
         return ChristmasLedger(ready_ledger()).assign_purchase(
             request_id=request_id,
@@ -533,8 +567,9 @@ def create_server(ledger: BudgetLedger) -> MCPServer:
     def get_christmas_summary(year: int) -> dict[str, Any]:
         """Return a server-calculated annual Christmas and gift comparison.
 
-        Includes only explicitly attributed purchases and their linked returns.
-        Ordinary or untagged receipts are never classified by this query. Show
+        Reports attributed purchases and their linked returns for the requested
+        year, with a separate warning for financial Christmas activity whose year
+        and allocations are still pending. No ordinary receipts are classified. Show
         unresolved/unassigned warnings with totals and comparisons; zero
         recorded gift value does not establish that a child received no gifts.
         Limits, remaining amounts, and gaps are informational, not write blocks.

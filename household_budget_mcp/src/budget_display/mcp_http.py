@@ -63,7 +63,8 @@ def _load_categories(
             raise BudgetValidationError("each category must be an object")
         name = str(item.get("name", "")).strip()
         parent = str(item.get("parent", "")).strip() or None
-        raw_budget = str(item.get("monthly_budget", "")).strip()
+        raw_budget = item.get("monthly_budget")
+        raw_budget = "" if raw_budget is None else str(raw_budget).strip()
         if not name or len(name) > 80:
             raise BudgetValidationError("category names must contain 1 to 80 characters")
         if parent is not None and len(parent) > 80:
@@ -77,12 +78,14 @@ def _load_categories(
                 f"subcategory {name!r} cannot define a monthly budget"
             )
         cents: int | None = None
-        if parent is None:
+        if parent is None and raw_budget:
+            if BudgetLedger.is_christmas_category(name):
+                raise BudgetValidationError("Christmas uses an annual budget")
             try:
                 amount = Decimal(raw_budget)
             except (InvalidOperation, ValueError) as exc:
                 raise BudgetValidationError(
-                    f"top-level category {name!r} needs a valid monthly_budget"
+                    f"top-level category {name!r} has an invalid monthly_budget"
                 ) from exc
             if (
                 not amount.is_finite()

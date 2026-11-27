@@ -76,7 +76,7 @@ class BudgetMQTTPublisherTests(unittest.TestCase):
             discovery["default_entity_id"],
             "sensor.household_budget_person_1_month",
         )
-        self.assertEqual(discovery["name"], "Alpha this month")
+        self.assertEqual(discovery["name"], "Alpha allowance spending this month")
         self.assertEqual(discovery["device_class"], "monetary")
         self.assertNotIn("state_class", discovery)
         self.assertNotIn("secret", json.dumps(discovery))
@@ -93,7 +93,7 @@ class BudgetMQTTPublisherTests(unittest.TestCase):
         )
         self.assertIn("household_budget/state/last_update", messages)
 
-    def test_category_rows_include_member_and_parent_totals(self) -> None:
+    def test_root_only_display_and_allowance_sensors_include_the_christmas_row(self) -> None:
         ledger = BudgetLedger(
             Path(self.temporary_directory.name) / "category-budget.db",
             members=("Alpha", "Beta"),
@@ -101,6 +101,10 @@ class BudgetMQTTPublisherTests(unittest.TestCase):
                 ("Meals", None, 60_000),
                 ("Food", "Meals", None),
                 ("Coffee", "Meals", None),
+                ("Everyday", None, 20_000),
+                ("Occasional", None, 20_000),
+                ("Other", None, None),
+                ("Christmas", None, None),
             ),
         )
         ledger.initialize()
@@ -115,6 +119,13 @@ class BudgetMQTTPublisherTests(unittest.TestCase):
             member="Beta",
             category="Meals/Coffee",
             amount="4.75",
+        )
+        ledger.add_expense(
+            request_id="christmas",
+            member="Alpha",
+            category="Christmas",
+            amount="80.00",
+            explicitly_requested_christmas=True,
         )
         client = FakeMQTTClient()
         publisher = BudgetMQTTPublisher(
@@ -131,13 +142,25 @@ class BudgetMQTTPublisherTests(unittest.TestCase):
             "0|Meals|600.00|10.25|4.75|15.00",
         )
         self.assertEqual(
-            messages["household_budget/state/category_2_month"],
-            "1|Food||10.25|0.00|10.25",
+            messages["household_budget/state/category_5_month"],
+            "0|Christmas||80.00|0.00|80.00",
         )
-        self.assertEqual(
-            messages["household_budget/state/category_3_month"],
-            "1|Coffee||0.00|4.75|4.75",
-        )
+        self.assertEqual(messages["household_budget/state/category_6_month"], "|||||")
+        self.assertEqual(messages["household_budget/state/spent_month"], "15.00")
+        self.assertEqual(messages["household_budget/state/remaining_month"], "985.00")
+        self.assertEqual(messages["household_budget/state/percent_used_month"], "1.5")
+        self.assertEqual(messages["household_budget/state/person_1_month"], "10.25")
+        self.assertEqual(messages["household_budget/state/person_2_month"], "4.75")
+        self.assertEqual(messages["household_budget/state/cash_flow_spent_month"], "95.00")
+        self.assertEqual(messages["household_budget/state/outside_allowance_spent_month"], "80.00")
+        key = publisher._category_key("Christmas")
+        for metric in ("budget", "remaining", "percent"):
+            object_id = f"category_{key}_{metric}_month"
+            self.assertIn(
+                (f"homeassistant/sensor/household_budget_{object_id}/config", "", 1, True),
+                client.messages,
+            )
+            self.assertIn((f"household_budget/state/{object_id}", "", 1, True), client.messages)
 
 
 if __name__ == "__main__":

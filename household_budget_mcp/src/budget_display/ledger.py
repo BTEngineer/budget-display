@@ -31,6 +31,7 @@ class DuplicateRequestError(BudgetValidationError):
     """Raised when a request ID is reused for a different operation."""
 
 
+CHRISTMAS_CATEGORY = "Christmas"
 DEFAULT_MEMBERS = ("Member 1", "Member 2")
 DEFAULT_CATEGORIES = (
     ("Everyday", None, 100_000),
@@ -38,6 +39,7 @@ DEFAULT_CATEGORIES = (
     ("Meals", None, 30_000),
     ("Food", "Meals", None),
     ("Drinks", "Meals", None),
+    (CHRISTMAS_CATEGORY, None, None),
 )
 MAX_SEARCH_LIMIT = 200
 DEFAULT_SEARCH_LIMIT = 50
@@ -91,6 +93,11 @@ class BudgetLedger:
         self.database = Path(database)
         self.members = tuple(members)
         self.categories = tuple(categories)
+        if any(
+            parent is None and self.is_christmas_category(name) and cents is not None
+            for name, parent, cents in self.categories
+        ):
+            raise BudgetValidationError("Christmas uses an annual budget")
         self.classification_aliases = tuple(classification_aliases)
         try:
             self.household_timezone = ZoneInfo(household_timezone)
@@ -477,6 +484,8 @@ class BudgetLedger:
             name: (None if fields.get(name) is None else str(fields.get(name)).strip())
             for name in allowed
         }
+        if self.is_christmas_category(normalized["suggested_category"] or ""):
+            normalized["suggested_category"] = None
         raw_ai_json = json.dumps(
             dict(fields), separators=(",", ":"), sort_keys=True
         )
@@ -534,6 +543,8 @@ class BudgetLedger:
             raise BudgetValidationError("unknown receipt draft")
         result = dict(row)
         result.pop("raw_ai_json", None)
+        if self.is_christmas_category(result["suggested_category"] or ""):
+            result["suggested_category"] = None
         return result
 
     def confirm_receipt_draft(
@@ -547,7 +558,9 @@ class BudgetLedger:
         business_name: str | None = None,
         description: str = "",
         occurred_at: str | None = None,
+        explicitly_requested_christmas: bool = False,
     ) -> dict[str, object]:
+        self._require_explicit_christmas(category, explicitly_requested_christmas)
         draft = self.get_receipt_draft(draft_id)
         if draft["status"] == "confirmed":
             if draft["confirmation_request_id"] != request_id:
@@ -583,6 +596,7 @@ class BudgetLedger:
                 ),
                 description=description,
                 occurred_at=occurred_at,
+                explicitly_requested_christmas=explicitly_requested_christmas,
             )
         except Exception:
             with self._connection() as connection:
@@ -655,6 +669,9 @@ class BudgetLedger:
                 "name": row["name"],
                 "parent": row["parent_name"],
                 "accepts_expenses": not bool(row["has_children"]),
+                "outside_monthly_allowance": self.is_christmas_category(
+                    row["parent_name"] or row["name"]
+                ),
             }
             for row in rows
         ]
@@ -669,8 +686,12 @@ class BudgetLedger:
         business_name: str = "",
         description: str = "",
         occurred_at: str | None = None,
+        explicitly_requested_christmas: bool = False,
     ) -> dict[str, object]:
         """Create a short-lived confirmation token bound to an exact expense."""
+        christmas = self._require_explicit_christmas(
+            category, explicitly_requested_christmas
+        )
         request_id = self._validated_request_id(request_id)
         cents = _parse_cents(amount)
         business_name = self._bounded_entry_text(
@@ -699,6 +720,8 @@ class BudgetLedger:
                 "description": description,
                 "occurred_at": normalized_timestamp,
             }
+            if christmas:
+                payload["explicitly_requested_christmas"] = True
             expires_at = datetime.now(timezone.utc) + timedelta(
                 seconds=CONFIRMATION_TTL_SECONDS
             )
@@ -727,6 +750,7 @@ class BudgetLedger:
         business_name: str = "",
         description: str = "",
         occurred_at: str | None = None,
+        explicitly_requested_christmas: bool = False,
     ) -> None:
         """Fail closed unless a confirmation token matches every expense field."""
         if occurred_at is None:
@@ -744,6 +768,7 @@ class BudgetLedger:
                 business_name=business_name,
                 description=description,
                 occurred_at=occurred_at,
+                explicitly_requested_christmas=explicitly_requested_christmas,
             )
 
     def prepare_split_expense(
@@ -755,6 +780,7 @@ class BudgetLedger:
         business_name: str = "",
         description: str = "",
         occurred_at: str | None = None,
+        explicitly_requested_christmas: bool = False,
     ) -> dict[str, object]:
         """Create a short-lived token bound to an exact split expense."""
         bound_occurred_at = occurred_at if occurred_at is not None else _utc_now()
@@ -767,6 +793,7 @@ class BudgetLedger:
                 business_name=business_name,
                 description=description,
                 occurred_at=bound_occurred_at,
+                explicitly_requested_christmas=explicitly_requested_christmas,
             )
             expires_at = datetime.now(timezone.utc) + timedelta(
                 seconds=CONFIRMATION_TTL_SECONDS
@@ -804,7 +831,9 @@ class BudgetLedger:
         occurred_at: str | None = None,
         confirmation_token: str | None = None,
         require_confirmation: bool = False,
+        explicitly_requested_christmas: bool = False,
     ) -> dict[str, object]:
+        self._require_explicit_christmas(category, explicitly_requested_christmas)
         request_id = request_id.strip()
         if not request_id:
             raise BudgetValidationError("request_id is required")
@@ -900,6 +929,7 @@ class BudgetLedger:
                     business_name=clean_business_name,
                     description=clean_description,
                     occurred_at=occurred_at,
+                    explicitly_requested_christmas=explicitly_requested_christmas,
                 )
             cursor = connection.execute(
                 """
@@ -1105,6 +1135,7 @@ class BudgetLedger:
         business_name: str | None = None,
         description: str | None = None,
         occurred_at: str | None = None,
+        explicitly_requested_christmas: bool = False,
     ) -> dict[str, object]:
         """Prepare an exact correction for explicit confirmation."""
         with self._connection() as connection:
@@ -1118,6 +1149,7 @@ class BudgetLedger:
                 business_name=business_name,
                 description=description,
                 occurred_at=occurred_at,
+                explicitly_requested_christmas=explicitly_requested_christmas,
             )
             if original["reversed_by_id"] is not None:
                 raise BudgetValidationError("a reversed expense cannot be corrected")
@@ -1160,6 +1192,7 @@ class BudgetLedger:
         description: str | None = None,
         occurred_at: str | None = None,
         confirmation_token: str | None = None,
+        explicitly_requested_christmas: bool = False,
     ) -> dict[str, object]:
         """Atomically reverse an expense and create its corrected replacement."""
         with self._connection() as connection:
@@ -1175,6 +1208,7 @@ class BudgetLedger:
                     business_name=business_name,
                     description=description,
                     occurred_at=occurred_at,
+                    explicitly_requested_christmas=explicitly_requested_christmas,
                 )
             )
             request_id = str(confirmation_payload["request_id"])
@@ -1305,6 +1339,7 @@ class BudgetLedger:
         occurred_at: str | None = None,
         confirmation_token: str | None = None,
         require_confirmation: bool = False,
+        explicitly_requested_christmas: bool = False,
     ) -> dict[str, object]:
         """Atomically record one purchase allocated across people or categories."""
         request_id = self._validated_request_id(request_id)
@@ -1339,6 +1374,9 @@ class BudgetLedger:
                 if amount_value is None:
                     raise BudgetValidationError(f"allocation {index} requires amount")
                 member_id = self._member_id(connection, member)
+                self._require_explicit_christmas(
+                    category, explicitly_requested_christmas
+                )
                 category_id = self._category_id(connection, category)
                 normalized.append(
                     {
@@ -1405,6 +1443,7 @@ class BudgetLedger:
                     business_name=business_name,
                     description=description,
                     occurred_at=occurred_at,
+                    explicitly_requested_christmas=explicitly_requested_christmas,
                 )
 
             group_id = f"split_{uuid4().hex}"
@@ -1568,6 +1607,7 @@ class BudgetLedger:
         business_name: str = "",
         description: str = "",
         occurred_at: str | None = None,
+        explicitly_requested_christmas: bool = False,
     ) -> dict[str, object]:
         """Record a linked or explicitly categorized unlinked refund."""
         request_id = request_id.strip()
@@ -1596,6 +1636,10 @@ class BudgetLedger:
                 raise BudgetValidationError("member is required for an unlinked refund")
             if category is None or not category.strip():
                 raise BudgetValidationError("category is required for an unlinked refund")
+        self._require_explicit_christmas(
+            (category or "") if clean_expense_id is None else "",
+            explicitly_requested_christmas,
+        )
         requested_timestamp = (
             self._normalize_timestamp(occurred_at)[0]
             if occurred_at is not None
@@ -2179,6 +2223,8 @@ class BudgetLedger:
             sample_count: int = 0,
             last_used_at: str | None = None,
         ) -> None:
+            if self.is_christmas_category(category):
+                return
             current = candidates.get(category.casefold())
             if current is None or score > int(current["score"]):
                 candidates[category.casefold()] = {
@@ -2192,7 +2238,7 @@ class BudgetLedger:
         with self._connection() as connection:
             for term, category in self.classification_aliases:
                 clean_term = " ".join(term.split())
-                if not clean_term:
+                if not clean_term or self.is_christmas_category(category):
                     continue
                 category_id = self._category_id(connection, category)
                 normalized_term = clean_term.casefold()
@@ -2299,18 +2345,6 @@ class BudgetLedger:
         spending = self.list_spending(month=month)
         cutoff = as_of_utc.isoformat(timespec="seconds")
         with self._connection() as connection:
-            spent_cents = int(
-                connection.execute(
-                    """
-                    SELECT COALESCE(SUM(amount_cents), 0) AS cents
-                    FROM ledger_entries
-                    WHERE local_month = ?
-                      AND occurred_at <= ?
-                      AND created_at <= ?
-                    """,
-                    (month, cutoff, cutoff),
-                ).fetchone()["cents"]
-            )
             category_spent_as_of = {
                 row["name"]: int(row["cents"])
                 for row in connection.execute(
@@ -2328,6 +2362,13 @@ class BudgetLedger:
                     (month, cutoff, cutoff),
                 ).fetchall()
             }
+        cash_flow_spent_cents = sum(category_spent_as_of.values())
+        outside_allowance_spent_cents = sum(
+            cents
+            for category, cents in category_spent_as_of.items()
+            if self.is_christmas_category(category)
+        )
+        spent_cents = cash_flow_spent_cents - outside_allowance_spent_cents
         projected_cents = (
             spent_cents
             if elapsed_days == days_in_month
@@ -2346,9 +2387,15 @@ class BudgetLedger:
         comparison_day = min(elapsed_days, previous_days)
         with self._connection() as connection:
             previous_rows = connection.execute(
-                "SELECT amount_cents, occurred_at FROM ledger_entries "
-                "WHERE local_month = ? AND created_at <= ?",
-                (previous_month_key, cutoff),
+                """
+                SELECT entry.amount_cents, entry.occurred_at
+                FROM ledger_entries entry
+                JOIN categories category ON category.id = entry.category_id
+                JOIN categories root ON root.id = COALESCE(category.parent_id, category.id)
+                WHERE entry.local_month = ? AND entry.created_at <= ?
+                  AND root.name != ?
+                """,
+                (previous_month_key, cutoff, CHRISTMAS_CATEGORY),
             ).fetchall()
         previous_same_point_cents = sum(
             int(row["amount_cents"])
@@ -2360,7 +2407,7 @@ class BudgetLedger:
         )
         category_risks: list[dict[str, object]] = []
         for row in spending["category_rows"]:
-            if row["budget_cents"] is None:
+            if row["budget_cents"] is None or row["outside_monthly_allowance"]:
                 continue
             row_spent_cents = category_spent_as_of.get(str(row["name"]), 0)
             category_projected = (
@@ -2389,7 +2436,11 @@ class BudgetLedger:
             "as_of": as_of_utc.isoformat(timespec="seconds"),
             "elapsed_days": elapsed_days,
             "days_in_month": days_in_month,
+            "spending_basis": "monthly_allowance",
             "spent_cents": spent_cents,
+            "allowance_spent_cents": spent_cents,
+            "cash_flow_spent_cents": cash_flow_spent_cents,
+            "outside_allowance_spent_cents": outside_allowance_spent_cents,
             "budget_cents": spending["budget_cents"],
             "remaining_discretionary_cents": (
                 None
@@ -2418,6 +2469,8 @@ class BudgetLedger:
         self, *, month: str, category: str, amount: str | Decimal
     ) -> dict[str, object]:
         _validate_month(month)
+        if self.is_christmas_category(category):
+            raise BudgetValidationError("Christmas uses an annual budget")
         cents = _parse_cents(amount)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -2445,6 +2498,8 @@ class BudgetLedger:
     def set_default_monthly_budget(
         self, *, category: str, amount: str | Decimal
     ) -> dict[str, object]:
+        if self.is_christmas_category(category):
+            raise BudgetValidationError("Christmas uses an annual budget")
         cents = _parse_cents(amount)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -2477,11 +2532,16 @@ class BudgetLedger:
             ).fetchone()["cents"]
             by_member = connection.execute(
                 """
-                SELECT members.name, COALESCE(SUM(ledger_entries.amount_cents), 0) AS cents
+                SELECT members.name, COALESCE(SUM(ledger_entries.amount_cents), 0) AS cents,
+                       COALESCE(SUM(CASE WHEN root.name != ?
+                                         THEN ledger_entries.amount_cents END), 0)
+                         AS allowance_cents
                 FROM members
                 LEFT JOIN ledger_entries
                   ON ledger_entries.member_id = members.id
                  AND ledger_entries.local_month = ?
+                LEFT JOIN categories category ON category.id = ledger_entries.category_id
+                LEFT JOIN categories root ON root.id = COALESCE(category.parent_id, category.id)
                 WHERE members.active = 1
                    OR EXISTS (
                        SELECT 1 FROM ledger_entries historic
@@ -2491,7 +2551,7 @@ class BudgetLedger:
                 GROUP BY members.id
                 ORDER BY members.id
                 """,
-                (month, month),
+                (CHRISTMAS_CATEGORY, month, month),
             ).fetchall()
             by_category = connection.execute(
                 """
@@ -2525,15 +2585,12 @@ class BudgetLedger:
                 SELECT category.name AS category_name,
                        parent.name AS parent_name,
                        members.name AS member_name,
-                       COALESCE(SUM(entry.amount_cents), 0) AS cents
-                FROM categories category
+                       SUM(entry.amount_cents) AS cents
+                FROM ledger_entries entry
+                JOIN categories category ON category.id = entry.category_id
                 LEFT JOIN categories parent ON parent.id = category.parent_id
-                CROSS JOIN members
-                LEFT JOIN ledger_entries entry
-                  ON entry.category_id = category.id
-                 AND entry.member_id = members.id
-                 AND entry.local_month = ?
-                WHERE category.active = 1 AND members.active = 1
+                JOIN members ON members.id = entry.member_id
+                WHERE entry.local_month = ?
                 GROUP BY category.id, members.id
                 ORDER BY category.id, members.id
                 """,
@@ -2549,8 +2606,14 @@ class BudgetLedger:
                 (month,),
             ).fetchall()
             budget = connection.execute(
-                "SELECT SUM(amount_cents) AS cents FROM monthly_budgets WHERE month = ?",
-                (month,),
+                """
+                SELECT SUM(monthly.amount_cents) AS cents
+                FROM monthly_budgets monthly
+                JOIN categories category ON category.id = monthly.category_id
+                JOIN categories root ON root.id = COALESCE(category.parent_id, category.id)
+                WHERE monthly.month = ? AND root.name != ?
+                """,
+                (month, CHRISTMAS_CATEGORY),
             ).fetchone()["cents"]
             connection.commit()
         direct: dict[tuple[str | None, str], dict[str, int]] = {}
@@ -2561,6 +2624,7 @@ class BudgetLedger:
         budget_by_root = {row["name"]: row["amount_cents"] for row in category_budgets}
         category_rows: list[dict[str, object]] = []
         for name, parent, _ in self.categories:
+            outside_monthly_allowance = self.is_christmas_category(parent or name)
             if parent is None:
                 included = [
                     amounts
@@ -2568,15 +2632,15 @@ class BudgetLedger:
                     if (row_parent is None and row_name == name)
                     or row_parent == name
                 ]
-                member_totals = {
-                    member: sum(amounts.get(member, 0) for amounts in included)
-                    for member in self.members
-                }
-                row_budget = budget_by_root.get(name)
+                member_totals = dict.fromkeys(self.members, 0)
+                for amounts in included:
+                    for member, cents in amounts.items():
+                        member_totals[member] = member_totals.get(member, 0) + cents
+                row_budget = None if outside_monthly_allowance else budget_by_root.get(name)
             else:
                 member_totals = {
-                    member: direct.get((parent, name), {}).get(member, 0)
-                    for member in self.members
+                    **dict.fromkeys(self.members, 0),
+                    **direct.get((parent, name), {}),
                 }
                 row_budget = None
             category_rows.append(
@@ -2584,16 +2648,22 @@ class BudgetLedger:
                     "name": name,
                     "parent": parent,
                     "budget_cents": row_budget,
+                    "outside_monthly_allowance": outside_monthly_allowance,
                     "spent_cents": sum(member_totals.values()),
                     "by_member_cents": member_totals,
                 }
             )
 
+        allowance_by_member = {row["name"]: row["allowance_cents"] for row in by_member}
+        allowance_spent = sum(allowance_by_member.values())
         return {
             "month": month,
             "spent_cents": total,
             "budget_cents": budget,
-            "remaining_cents": None if budget is None else budget - total,
+            "remaining_cents": None if budget is None else budget - allowance_spent,
+            "allowance_spent_cents": allowance_spent,
+            "outside_allowance_spent_cents": total - allowance_spent,
+            "allowance_by_member_cents": allowance_by_member,
             "by_member_cents": {row["name"]: row["cents"] for row in by_member},
             "by_category_cents": {
                 row["name"]: row["cents"] for row in by_category
@@ -2700,6 +2770,7 @@ class BudgetLedger:
         business_name: str | None,
         description: str | None,
         occurred_at: str | None,
+        explicitly_requested_christmas: bool = False,
     ) -> tuple[sqlite3.Row, dict[str, object], dict[str, object], str]:
         request_id = self._validated_request_id(request_id)
         transaction_id = transaction_id.strip()
@@ -2768,6 +2839,11 @@ class BudgetLedger:
             "description": resolved_description,
             "occurred_at": resolved_timestamp,
         }
+        category_path = self._category_path(connection, resolved_category_id)
+        christmas = self._require_explicit_christmas(
+            category_path if resolved_category_id != original["category_id"] else "",
+            explicitly_requested_christmas,
+        )
         confirmation_payload = {
             "confirmation_type": "correction",
             "request_id": request_id,
@@ -2775,12 +2851,14 @@ class BudgetLedger:
             "member": connection.execute(
                 "SELECT name FROM members WHERE id = ?", (resolved_member_id,)
             ).fetchone()["name"],
-            "category": self._category_path(connection, resolved_category_id),
+            "category": category_path,
             "amount_cents": resolved_cents,
             "business_name": resolved_business,
             "description": resolved_description,
             "occurred_at": resolved_timestamp,
         }
+        if christmas:
+            confirmation_payload["explicitly_requested_christmas"] = True
         return original, persistence_payload, confirmation_payload, resolved_month
 
     def _validate_expense_confirmation(
@@ -2795,7 +2873,11 @@ class BudgetLedger:
         business_name: str,
         description: str,
         occurred_at: str | None,
+        explicitly_requested_christmas: bool = False,
     ) -> None:
+        christmas = self._require_explicit_christmas(
+            category, explicitly_requested_christmas
+        )
         if occurred_at is None:
             raise BudgetValidationError(
                 "occurred_at returned by prepare_expense is required with confirmation_token"
@@ -2819,6 +2901,8 @@ class BudgetLedger:
             ),
             "occurred_at": self._normalize_timestamp(occurred_at)[0],
         }
+        if christmas:
+            expected["explicitly_requested_christmas"] = True
         if any(actual.get(key) != value for key, value in expected.items()):
             raise BudgetValidationError(
                 "confirmation token does not match the exact expense payload"
@@ -2848,6 +2932,7 @@ class BudgetLedger:
         business_name: object = "",
         description: object = "",
         occurred_at: object = None,
+        explicitly_requested_christmas: bool = False,
     ) -> dict[str, object]:
         if not isinstance(request_id, str):
             raise BudgetValidationError("request_id is required")
@@ -2860,15 +2945,19 @@ class BudgetLedger:
                 f"allocations must contain between 2 and {MAX_SPLIT_ALLOCATIONS} items"
             )
         normalized: list[dict[str, object]] = []
+        christmas = False
         for index, allocation in enumerate(allocations, start=1):
             if not isinstance(allocation, Mapping):
                 raise BudgetValidationError(f"allocation {index} must be an object")
             member_id = self._member_id(
                 connection, str(allocation.get("member", ""))
             )
-            category_id = self._category_id(
-                connection, str(allocation.get("category", ""))
+            category = str(allocation.get("category", ""))
+            is_christmas = self._require_explicit_christmas(
+                category, explicitly_requested_christmas
             )
+            christmas = christmas or is_christmas
+            category_id = self._category_id(connection, category)
             if allocation.get("amount") is None:
                 raise BudgetValidationError(f"allocation {index} requires amount")
             normalized.append(
@@ -2889,7 +2978,7 @@ class BudgetLedger:
             raise BudgetValidationError("business_name and description must be text")
         if occurred_at is not None and not isinstance(occurred_at, str):
             raise BudgetValidationError("occurred_at must be an ISO 8601 timestamp")
-        return {
+        payload = {
             "confirmation_type": "split_expense",
             "request_id": self._validated_request_id(request_id),
             "total_cents": total_cents,
@@ -2906,6 +2995,9 @@ class BudgetLedger:
                 else None
             ),
         }
+        if christmas:
+            payload["explicitly_requested_christmas"] = True
+        return payload
 
     @staticmethod
     def _category_path(connection: sqlite3.Connection, category_id: int) -> str:
@@ -3140,6 +3232,22 @@ class BudgetLedger:
         if row is None:
             raise BudgetValidationError(f"unknown category: {path}")
         return [row["id"]]
+
+    @staticmethod
+    def is_christmas_category(path: str) -> bool:
+        root = next((part.strip() for part in path.split("/") if part.strip()), "")
+        return root.lower() == CHRISTMAS_CATEGORY.lower()
+
+    @classmethod
+    def _require_explicit_christmas(
+        cls, path: str, explicitly_requested_christmas: bool
+    ) -> bool:
+        if type(explicitly_requested_christmas) is not bool:
+            raise BudgetValidationError("explicitly_requested_christmas must be a boolean")
+        christmas = cls.is_christmas_category(path)
+        if christmas and not explicitly_requested_christmas:
+            raise BudgetValidationError("the Christmas category requires an explicit Christmas request")
+        return christmas
 
     @staticmethod
     def _category_parts(path: str) -> list[str]:

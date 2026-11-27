@@ -70,6 +70,117 @@ class ChristmasLedgerTests(unittest.TestCase):
         with self.assertRaisesRegex(BudgetValidationError, "equal"):
             self.assign(entry, request_id="wrong", gifts=[], overhead_amount="71.00")
 
+    def test_pending_category_amounts_do_not_infer_a_year_or_count_twice(self):
+        purchase = self.ledger.add_expense(
+            request_id="pending", member="Member 1", category="Christmas", amount="67.00",
+            explicitly_requested_christmas=True, occurred_at="2026-01-01T12:00:00-05:00",
+        )
+        purchase_id = purchase["transaction"]["transaction_id"]
+        self.ledger.refund_expense(request_id="pending-refund", expense_id=purchase_id, amount="2.00")
+        for year in (2026, 2027):
+            summary = self.christmas.summary(year=year)
+            self.assertIsNone(summary["spent_cents"])
+            self.assertEqual(summary["known_spent_cents"], 0)
+            self.assertEqual(summary["pending_purchase_count"], 1)
+            self.assertEqual(summary["pending_purchase_cents"], 6500)
+        self.christmas.assign_purchase(
+            request_id="pending-metadata", transaction_id=purchase_id, gifts=[],
+            overhead_amount="67.00", year=2027, explicitly_requested=True,
+        )
+        self.assertEqual(self.christmas.summary(year=2026)["spent_cents"], 0)
+        summary = self.christmas.summary(year=2027)
+        self.assertEqual(summary["pending_purchase_count"], 0)
+        self.assertEqual(summary["spent_cents"], 6500)
+
+    def test_clearing_a_categorized_purchase_after_refund_keeps_financial_christmas_pending(self):
+        entry = self.ledger.add_expense(
+            request_id="categorized-for-clear", member="Member 1", category="Christmas", amount="110.00",
+            occurred_at="2026-12-04T12:00:00-05:00", explicitly_requested_christmas=True,
+        )
+        entry["transaction_id"] = entry["transaction"]["transaction_id"]
+        self.assign(entry)
+        refund = self.refund(entry, "21.00")
+        self.christmas.resolve_refund(
+            request_id="before-clear-refund", transaction_id=refund["transaction_id"],
+            gifts=[{"gift_id": "gift_1", "amount": "20.00"}], overhead_amount="1.00",
+            explicitly_requested=True,
+        )
+        self.assign(entry, request_id="clear-categorized", gifts=[],
+                    overhead_amount="0.00", ordinary_amount="110.00")
+        summary = self.christmas.summary(year=2026)
+        self.assertEqual(summary["pending_purchase_count"], 1)
+        self.assertEqual(summary["pending_purchase_cents"], 8900)
+        self.assertIsNone(summary["spent_cents"])
+        self.assertEqual(self.ledger.list_spending(month="2026-12")["allowance_spent_cents"], 0)
+        self.assign(entry, request_id="assign-again")
+        summary = self.christmas.summary(year=2026)
+        self.assertEqual(summary["pending_purchase_count"], 0)
+        self.assertEqual(summary["spent_cents"], 8900)
+        self.assertEqual(summary["unresolved_refund_cents"], 2100)
+
+    def test_pending_category_ignores_reversal_and_tracks_correction_only_once(self):
+        expense = self.ledger.add_expense(
+            request_id="initial", member="Member 1", category="Christmas", amount="10.00",
+            explicitly_requested_christmas=True,
+        )
+        self.ledger.correct_expense(
+            request_id="correction", transaction_id=expense["transaction"]["transaction_id"], amount="12.00",
+        )
+        self.assertEqual(self.christmas.summary(year=2026)["pending_purchase_cents"], 1200)
+        self.ledger.undo_last_expense(request_id="undo-correction", member="Member 1")
+        summary = self.christmas.summary(year=2026)
+        self.assertEqual(summary["pending_purchase_count"], 0)
+        self.assertEqual(summary["spent_cents"], 0)
+        self.ledger.refund_expense(
+            request_id="unlinked", member="Member 1", category="Christmas", amount="3.00",
+            explicitly_requested_christmas=True,
+        )
+        summary = self.christmas.summary(year=2026)
+        self.assertEqual(summary["pending_unlinked_refund_count"], 1)
+        self.assertEqual(summary["pending_unlinked_refund_cents"], 300)
+        self.assertIsNone(summary["spent_cents"])
+
+    def test_mixed_financial_category_and_metadata_match_and_unresolved_refund_keeps_annual_cash(self):
+        payment = self.ledger.add_split_expense(
+            request_id="holiday-split", total_amount="70.00", explicitly_requested_christmas=True,
+            allocations=[
+                {"member": "Member 1", "category": "Christmas", "amount": "30.00"},
+                {"member": "Member 1", "category": "Everyday", "amount": "40.00"},
+            ],
+            occurred_at="2026-12-10T12:00:00-05:00",
+        )
+        transaction_id = payment["split_transaction_id"]
+        attribution = dict(request_id="split-details", transaction_id=transaction_id,
+                           gifts=[{"description": "Gift", "amount": "20.00", "recipient_ids": [self.alex]}],
+                           year=2026, explicitly_requested=True)
+        with self.assertRaisesRegex(BudgetValidationError, "financial Christmas category portion"):
+            self.christmas.assign_purchase(**attribution, overhead_amount="9.00")
+        self.christmas.assign_purchase(**attribution, overhead_amount="10.00")
+        ordinary_id = next(row["transaction_id"] for row in payment["allocations"] if row["category"] == "Everyday")
+        christmas_id = next(row["transaction_id"] for row in payment["allocations"] if row["category"] == "Christmas")
+        self.ledger.refund_expense(request_id="return-ordinary", expense_id=ordinary_id, amount="5.00")
+        ordinary_return = self.christmas.summary(year=2026)
+        self.assertEqual(ordinary_return["spent_cents"], 3000)
+        self.assertEqual(ordinary_return["unresolved_refund_cents"], 0)
+        self.assertTrue(ordinary_return["comparison_complete"])
+        refund = self.ledger.refund_expense(request_id="return-christmas", expense_id=christmas_id, amount="6.00")
+        result = self.christmas.summary(year=2026)
+        self.assertEqual(result["spent_cents"], 2400)
+        self.assertEqual(result["unresolved_refund_cents"], 600)
+        self.assertFalse(result["comparison_complete"])
+        with self.assertRaisesRegex(BudgetValidationError, "linked financial category"):
+            self.christmas.resolve_refund(
+                request_id="wrong-category", transaction_id=refund["transaction"]["transaction_id"],
+                gifts=[], ordinary_amount="6.00", explicitly_requested=True,
+            )
+
+        self.ledger.refund_expense(request_id="return-rest", expense_id=christmas_id, amount="24.00")
+        complete = self.christmas.summary(year=2026)
+        self.assertEqual(complete["spent_cents"], 0)
+        self.assertEqual(complete["unresolved_refund_cents"], 0)
+        self.assertTrue(complete["comparison_complete"])
+        self.assertEqual(self.child_values(complete), {self.alex: 0, self.blair: 0})
+
     def test_partial_refunds_are_unresolved_until_gift_and_overhead_are_explicit(self):
         entry = self.expense()
         self.assign(entry)

@@ -145,6 +145,70 @@ class BudgetMCPHTTPTests(unittest.TestCase):
         self.assertEqual(recent[0]["transaction"]["business_name"], "Local Shop")
         self.assertTrue(recent[0]["occurred_at"].startswith("2026-08-01T16:00:00"))
 
+    def test_christmas_json_payment_and_attribution_are_two_idempotent_operations(self):
+        headers = {"Authorization": f"Bearer {TOKEN}"}
+        expense_path = "/api/v1/expenses"
+        details_path = "/api/v1/christmas/attributions"
+        expense = {"request_id": "ha-christmas-expense", "member": "Member 1",
+                   "category": "Christmas", "amount": "500.01", "occurred_on": "2026-12-15"}
+        for intent in ({}, {"explicitly_requested_christmas": "true"},
+                       {"explicitly_requested_christmas": 1}, {"explicitly_requested_christmas": False}):
+            self.assertEqual(self.client.post(expense_path, headers=headers, json={
+                **expense, **intent, "confirm_large_expense": True,
+            }).status_code, 422)
+        explicit = {**expense, "explicitly_requested_christmas": True}
+        self.assertEqual(self.client.post(expense_path, headers=headers, json=explicit).status_code, 422)
+        expense = {**explicit, "confirm_large_expense": True}
+        added = self.client.post(expense_path, headers=headers, json=expense)
+        self.assertEqual(added.status_code, 201)
+        entry = added.json()["entry"]
+        transaction_id = entry["transaction"]["transaction_id"]
+        self.assertTrue(self.client.post(expense_path, headers=headers, json=expense).json()["entry"]["duplicate"])
+        details = {"request_id": "ha-christmas-details", "transaction_id": transaction_id,
+                   "year": 2027, "gifts": [], "overhead_amount": "500.01",
+                   "ordinary_amount": "0.00", "explicitly_requested": True}
+        self.assertEqual(self.client.post(details_path, json=details).status_code, 401)
+        for invalid in ({"explicitly_requested": "true"}, {"overhead_amount": "400.01"},
+                        {"transaction_id": "unknown"}):
+            rejected = self.client.post(details_path, headers=headers, json={**details, **invalid})
+            self.assertEqual(rejected.status_code, 422)
+        result = self.client.post(details_path, headers=headers, json=details)
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json()["attribution"]["purchase_key"], transaction_id)
+        self.assertFalse(result.json()["attribution"]["duplicate"])
+        replay = self.client.post(details_path, headers=headers, json=details)
+        self.assertTrue(replay.json()["attribution"]["duplicate"])
+        self.assertEqual(self.client.post(details_path, headers=headers, json={
+            **details, "year": 2028,
+        }).status_code, 409)
+        recent = self.client.get("/api/v1/recent", headers=headers).json()["expenses"]
+        self.assertEqual([row["transaction"]["transaction_id"] for row in recent], [transaction_id])
+
+    def test_receipt_confirmation_rejects_non_explicit_christmas_and_sanitizes_suggestion(self):
+        headers = {"Authorization": f"Bearer {TOKEN}"}
+        upload = self.client.post(
+            "/api/v1/receipts",
+            headers={**headers, "Content-Type": "image/png", "X-Receipt-Filename": "phone.png"},
+            content=b"\x89PNG\r\n\x1a\nchristmas receipt fixture",
+        )
+        draft_id = upload.json()["draft"]["id"]
+        path = f"/api/v1/receipts/{draft_id}"
+        analysis = self.client.post(f"{path}/analysis", headers=headers, json={
+            "ai_entity_id": "ai_task.fixture", "fields": {"suggested_category": "Christmas", "total": "10.00"},
+        })
+        self.assertEqual(analysis.status_code, 200)
+        self.assertFalse(analysis.json()["draft"]["suggested_category"])
+        expense = {"request_id": "ha-christmas-receipt", "member": "Member 1",
+                   "category": "Christmas", "amount": "10.00", "occurred_on": "2026-12-15"}
+        self.assertEqual(self.client.post(f"{path}/confirm", headers=headers, json=expense).status_code, 422)
+        expense["explicitly_requested_christmas"] = True
+        posted = self.client.post(f"{path}/confirm", headers=headers, json=expense)
+        self.assertEqual(posted.status_code, 201)
+        self.assertTrue(self.client.post(f"{path}/confirm", headers=headers, json=expense).json()["entry"]["duplicate"])
+        self.assertEqual(self.client.post(f"{path}/confirm", headers=headers, json={
+            **expense, "explicitly_requested_christmas": False,
+        }).status_code, 422)
+
     def test_receipt_upload_analysis_and_confirmation(self) -> None:
         headers = {
             "Authorization": f"Bearer {TOKEN}",

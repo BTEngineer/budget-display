@@ -11,6 +11,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from .christmas import ChristmasLedger
 from .ledger import BudgetLedger, BudgetValidationError, DuplicateRequestError
 from .receipt_store import MAX_RECEIPT_BYTES, ReceiptStore
 
@@ -39,6 +40,13 @@ def _confirm_large_amount(amount: object, confirmed: object) -> None:
         raise BudgetValidationError(
             "expense exceeds $500 and requires explicit large-expense acknowledgement"
         )
+
+
+def _explicit_christmas(payload: dict[str, Any]) -> bool:
+    value = payload.get("explicitly_requested_christmas", False)
+    if type(value) is not bool:
+        raise BudgetValidationError("explicitly_requested_christmas must be a boolean")
+    return value
 
 
 class BudgetJSONAPI:
@@ -136,8 +144,22 @@ class BudgetJSONAPI:
                 business_name=str(payload.get("business_name", "")).strip()[:200],
                 description=str(payload.get("description", "")).strip()[:1000],
                 occurred_at=self._occurred_at(payload),
+                explicitly_requested_christmas=_explicit_christmas(payload),
             )
             return JSONResponse({"entry": entry}, status_code=201)
+        if method == "POST" and path == "/api/v1/christmas/attributions":
+            payload = await self._json(request)
+            attribution = ChristmasLedger(self.ledger).assign_purchase(
+                request_id=payload.get("request_id"),
+                transaction_id=payload.get("transaction_id"),
+                gifts=payload.get("gifts"),
+                overhead_amount=payload.get("overhead_amount", "0.00"),
+                ordinary_amount=payload.get("ordinary_amount"),
+                year=payload.get("year"),
+                explicitly_requested=payload.get("explicitly_requested"),
+                require_christmas_category=True,
+            )
+            return JSONResponse({"attribution": attribution})
         if method == "POST" and path == "/api/v1/undo":
             payload = await self._json(request)
             entry = self.ledger.undo_last_expense(
@@ -212,6 +234,7 @@ class BudgetJSONAPI:
                     ),
                     description=str(payload.get("description", "")).strip()[:1000],
                     occurred_at=self._occurred_at(payload),
+                    explicitly_requested_christmas=_explicit_christmas(payload),
                 )
                 try:
                     self.receipts.delete(str(result["draft"]["relative_path"]))

@@ -10,17 +10,26 @@ seven Christmas-only tools, bringing the MCP surface to twenty-one tools.
 
 ## Release status
 
-Version 0.11.0 adds annual Christmas
-budgets and recipient gift-value comparisons as audited attribution over existing
-purchases, retaining ordinary monthly financial and receipt behavior. Christmas
-attribution requires a specific user request and `explicitly_requested: true`;
-receipt content, dates, merchants, and classification suggestions never supply
-that intent. See the versioned Christmas reference for setup, allocation, and
-refund examples.
+Budget MCP 0.12.0 and Home Assistant integration 0.10.0 are implemented in
+source. Source delivery does not establish deployment or live acceptance. The
+[0.12.0 Christmas category reference](docs/christmas-category-mcp-0.12.0.md)
+documents the financial category, reporting and reviewed entry flow.
 
-The test suite covers original-table preservation and synthetic older-code
-compatibility. Source tests do not replace operational backup and deployment
-checks.
+Version 0.11.0 was deployed. It added annual Christmas budgets and recipient
+gift-value comparisons as audited attribution over existing purchases, retaining
+ordinary monthly financial and receipt behavior. Christmas attribution requires
+a specific user request and `explicitly_requested: true`; receipt content, dates,
+merchants, and classification suggestions never supply that intent. See the
+versioned Christmas reference for setup, allocation, and refund examples.
+
+All 110 tests pass on Windows and against the installed Linux image. Actual
+container bootstrap, isolated Supervisor/MQTT discovery, fresh stopped-checkpoint
+migration and older-code compatibility, and live original-data/source/security
+checks also pass. The complete fresh app backup is hash-verified off host.
+Native Home/Savannah client activation and restoration of original app settings
+are verified. Those checks describe the deployed 0.11.0 release.
+Acceptance of 0.12.0 remains a separate rollout step. A complete production backup restore and real
+household gift-entry workflow have not been exercised.
 
 ## Configuration
 
@@ -39,8 +48,11 @@ Add the LAN address used by the MCP client before connecting it. Entries use
 `host:port` format without `http://` or a path.
 
 Replace the generic `members` and `categories` values before first start.
-Top-level category rows require a positive `monthly_budget`. Subcategory rows
-set `parent` to the exact top-level name and leave `monthly_budget` blank.
+A top-level category accepts a positive `monthly_budget` or a blank limit.
+Configure Christmas as a top-level category with a blank monthly limit and
+retain the separately configured annual budget. Add the root to existing app
+options when deploying this feature. Subcategory rows set `parent` to the
+top-level name and leave `monthly_budget` blank.
 Configuration changes deactivate removed names for new expenses without
 deleting their historical ledger entries. `household_timezone` controls which
 local calendar month receives each expense.
@@ -48,18 +60,20 @@ local calendar month receives each expense.
 Optional `classification_aliases` entries contain `term` and `category`.
 Categories must be exact configured paths such as `Meals/Food`. Aliases affect
 only `suggest_expense_classification`; they never choose a category for a write.
-Terms match at lexical boundaries rather than arbitrary substrings.
+Terms match at lexical boundaries. The suggestion tool excludes Christmas
+aliases, merchant history and category-name matches.
 
 ## Hermes endpoint
 
 The endpoint is `http://<home-assistant-address>:8099/mcp`. Configure the MCP
 client with the same token as an `Authorization: Bearer ...` header. Keep the
-twenty-one-tool allowlist in `hermes-config.example.yaml` when deploying 0.11.0.
+twenty-one-tool allowlist in `hermes-config.example.yaml` for the 0.12.0 contract.
 
 The same listener exposes `/api/v1` for the Household Budget custom integration.
 It uses the same bearer token and Host allowlist. The API is intentionally
 limited to configuration, summaries, recent expenses, validated expense/undo
-operations, and the receipt draft lifecycle. It exposes no SQL, shell,
+operations, the receipt draft lifecycle and attribution for verified financial
+Christmas purchases. It exposes no SQL, shell,
 filesystem browsing, credential, or arbitrary Home Assistant operation.
 Configure the custom integration with
 `http://9930efe6-household-budget-mcp:8099` so Home Assistant uses Supervisor's
@@ -133,10 +147,10 @@ Version 0.11.0 also exposes:
 
 It does not expose arbitrary SQL, filesystem, shell, deletion, or general
 monthly-budget configuration tools. Annual-limit configuration is restricted
-to the Christmas tools. Ordinary expense and receipt operations never call
-Christmas attribution. Use a separate idempotency request ID for each financial
-operation and its Christmas attribution, so a failed or retried attribution
-cannot duplicate the original expense.
+to the Christmas tools. When the user explicitly requests Christmas, the financial
+write uses `explicitly_requested_christmas: true`. Use a separate idempotency
+request ID for the subsequent attribution against the verified expense or split
+purchase. The existing amount and confirmation rules apply.
 
 ## Version 0.9 operations
 
@@ -197,10 +211,11 @@ cents and the configured household timezone. Hermes should present these
 server-calculated results rather than recomputing them from conversational
 memory.
 
-Every `as_of` ledger query requires both the transaction occurrence time and
-server recording time to be at or before the cutoff. Consequently, a
-correction recorded later cannot retroactively add its replacement to an
-earlier outlook while its balancing reversal remains outside that outlook.
+In 0.12.0, the outlook uses the ordinary allowance for pace, projections and
+comparison. `cash_flow_spent_cents` and `outside_allowance_spent_cents` expose
+the cutoff cash flow separately. The target month filters occurrence time and
+recording time to the cutoff. The previous-month comparison uses the
+comparable local day and records available at that cutoff.
 
 ## Transaction search and refunds
 
@@ -460,9 +475,10 @@ cleanup procedure.
 
 ### Delivery status and operational boundary
 
-Publishing source, updating an installed Home Assistant app, and changing a
-running Hermes allowlist are separate operational steps. Source delivery
-does not rotate credentials or authorize financial mutations.
+Version 0.10.0 is implemented on its development branch but is not deployed by
+source delivery. This work does not restart the live Home Assistant app, alter
+the live Hermes allowlist, rotate credentials, or perform live financial
+mutations. Those remain separately controlled operational actions.
 
 ## Persistence and backup
 
@@ -472,28 +488,24 @@ Assistant backups and perform a restore test before relying on it.
 
 ## Display sensors
 
-The app uses Home Assistant's internal MQTT service to publish read-only,
-retained sensor discovery and current-month states. Supervisor supplies the
-broker credentials at runtime. The stable display entity IDs are:
+The app publishes retained current-month MQTT sensors through Home Assistant.
+Supervisor supplies broker credentials at runtime.
 
-- `sensor.household_budget_spent_month`
-- `sensor.household_budget_remaining_month`
-- `sensor.household_budget_person_1_month`
-- `sensor.household_budget_person_2_month`
+- Existing `spent_month`, `remaining_month`, `budget_month`,
+  `percent_used_month` and numbered `person_{n}_month` entities report the
+  ordinary monthly allowance.
+- `sensor.household_budget_cash_flow_spent_month` shows net total cash outflow.
+  `sensor.household_budget_outside_allowance_spent_month` shows net Christmas
+  category cash outflow.
 - `sensor.household_budget_category_1_month` through
-  `sensor.household_budget_category_6_month`
+  `sensor.household_budget_category_6_month` use the existing packed format for
+  top-level cash flow. Each root includes child totals. The intended household
+  configuration uses five rows including Christmas. The summary API supplies
+  child detail.
 
-Additional configured members use the same numbered pattern. Sensor
-availability follows the budget app's MQTT connection. Each numbered category
-row carries its label, optional top-level budget, first-member total,
-second-member total, and combined total for the E1001. The current display fits
-six category rows. Parent rows aggregate their child categories; child rows are
-also published as detail, and the household total counts each expense once.
-
-Version 0.8.0 continues publishing the dashboard-oriented numeric sensors
-introduced in 0.7 for total budget, percentage used, last update, and stable
-per-top-level-category budget, spent, remaining, and percentage values. The
-original numbered category strings remain unchanged for E1001 compatibility.
+Per-root spent sensors report cash flow. An uncapped category has a blank
+limit in its packed row, and the app clears its retained budget, remaining and
+percentage entities.
 
 ## Security
 

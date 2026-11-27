@@ -296,7 +296,17 @@ class ChristmasLedger:
             return self._audit(connection, request_id, "year", str(year), payload,
                                {"year": year, "budget_cents": budget_cents, "child_recipient_ids": children})
 
-    def _purchase(self, connection: sqlite3.Connection, transaction_id: str) -> dict[str, Any]:
+    def _christmas_category_ids(self, connection: sqlite3.Connection) -> set[int]:
+        return {
+            row["id"] for row in connection.execute(
+                "SELECT category.id, COALESCE(parent.name, category.name) AS root_name "
+                "FROM categories category LEFT JOIN categories parent ON parent.id = category.parent_id"
+            )
+            if self.ledger.is_christmas_category(row["root_name"])
+        }
+
+    def _purchase(self, connection: sqlite3.Connection, transaction_id: str,
+                  christmas_category_ids: set[int] | None = None) -> dict[str, Any]:
         transaction_id = _text(transaction_id, "transaction_id")
         entry = connection.execute(
             "SELECT * FROM ledger_entries WHERE transaction_id = ?", (transaction_id,)
@@ -329,9 +339,19 @@ class ChristmasLedger:
             f"SELECT * FROM ledger_entries WHERE refunds_entry_id IN ({placeholders}) "
             "AND operation_type = 'refund' ORDER BY id", ids
         ).fetchall()
+        if christmas_category_ids is None:
+            christmas_category_ids = self._christmas_category_ids(connection)
+        christmas_entries = {item["id"] for item in current if item["category_id"] in christmas_category_ids}
+        christmas_cents = sum(item["amount_cents"] for item in current if item["id"] in christmas_entries)
+        christmas_refunds = {refund["id"] for refund in refunds if refund["refunds_entry_id"] in christmas_entries}
         return {"purchase_key": key, "purchase_cents": sum(item["amount_cents"] for item in current),
                 "occurred_at": current[0]["occurred_at"], "refunds": refunds,
                 "reversed": reversed_purchase,
+                "christmas_category_cents": christmas_cents,
+                "christmas_category_refund_ids": christmas_refunds,
+                "christmas_category_remaining_cents": christmas_cents + sum(
+                    refund["amount_cents"] for refund in refunds if refund["id"] in christmas_refunds
+                ),
                 "transaction_ids": [item["transaction_id"] for item in current]}
 
     def _gifts(self, connection: sqlite3.Connection, gifts: object) -> list[dict[str, Any]]:
@@ -371,7 +391,8 @@ class ChristmasLedger:
 
     def assign_purchase(self, *, request_id: str, transaction_id: str, gifts: list[dict[str, Any]],
                         overhead_amount: str = "0.00", ordinary_amount: str | None = None,
-                        year: int | None = None, explicitly_requested: bool = False) -> dict[str, Any]:
+                        year: int | None = None, explicitly_requested: bool = False,
+                        require_christmas_category: bool = False) -> dict[str, Any]:
         if explicitly_requested is not True:
             raise BudgetValidationError("Christmas attribution requires an explicit user request")
         request_id = _text(request_id, "request_id")
@@ -382,9 +403,13 @@ class ChristmasLedger:
         with self.ledger._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._ready(connection)
+            purchase = self._purchase(connection, transaction_id) if require_christmas_category else None
+            if purchase is not None and not purchase["christmas_category_cents"]:
+                raise BudgetValidationError("transaction must be an expense in the Christmas category")
             if (retry := self._retry(connection, request_id, "purchase", request)) is not None:
                 return retry
-            purchase = self._purchase(connection, transaction_id)
+            if purchase is None:
+                purchase = self._purchase(connection, transaction_id)
             if purchase["reversed"]:
                 raise BudgetValidationError("a reversed purchase cannot receive Christmas attribution")
             existing = connection.execute(
@@ -401,6 +426,11 @@ class ChristmasLedger:
             ordinary = purchase["purchase_cents"] - christmas if ordinary_amount is None else _cents(ordinary_amount)
             if ordinary < 0 or christmas + ordinary != purchase["purchase_cents"]:
                 raise BudgetValidationError("gift, overhead and ordinary amounts must equal the purchase total")
+            categorized = purchase["christmas_category_cents"]
+            if categorized and christmas and christmas != categorized:
+                raise BudgetValidationError(
+                    "gift and overhead amounts must equal the financial Christmas category portion"
+                )
             payload = {"purchase_key": purchase["purchase_key"], "year": resolved_year,
                        "purchase_cents": purchase["purchase_cents"], "gifts": normalized,
                        "overhead_cents": overhead, "ordinary_cents": ordinary}
@@ -417,7 +447,8 @@ class ChristmasLedger:
                     "INSERT INTO christmas_refunds(refund_entry_id,purchase_key,payload_json) VALUES (?,?,?) "
                     "ON CONFLICT(refund_entry_id) DO UPDATE SET payload_json=excluded.payload_json",
                     [(refund["id"], purchase["purchase_key"], _json({
-                        "gifts": {}, "overhead_cents": 0, "ordinary_cents": -refund["amount_cents"]
+                        "gifts": {}, "overhead_cents": 0, "ordinary_cents": -refund["amount_cents"],
+                        **({"cleared_christmas_category": True} if categorized else {}),
                     })) for refund in purchase["refunds"]],
                 )
                 clear_audit = {
@@ -468,8 +499,13 @@ class ChristmasLedger:
                 amounts[gift_id] = _cents(gift["amount"], positive=True)
             payload = {"gifts": amounts, "overhead_cents": _cents(overhead_amount),
                        "ordinary_cents": _cents(ordinary_amount)}
-            if sum(amounts.values()) + payload["overhead_cents"] + payload["ordinary_cents"] != -refund["amount_cents"]:
+            christmas = sum(amounts.values()) + payload["overhead_cents"]
+            if christmas + payload["ordinary_cents"] != -refund["amount_cents"]:
                 raise BudgetValidationError("refund gift, overhead and ordinary amounts must equal the refund total")
+            if purchase["christmas_category_cents"]:
+                christmas_refund = refund["id"] in purchase["christmas_category_refund_ids"]
+                if christmas != (-refund["amount_cents"] if christmas_refund else 0):
+                    raise BudgetValidationError("refund attribution must match the linked financial category")
             connection.execute(
                 "INSERT INTO christmas_refunds(refund_entry_id,purchase_key,payload_json) VALUES (?,?,?) "
                 "ON CONFLICT(refund_entry_id) DO UPDATE SET payload_json=excluded.payload_json",
@@ -479,8 +515,12 @@ class ChristmasLedger:
             return self._audit(connection, request_id, "refund", transaction_id, request,
                                {"transaction_id": transaction_id, "purchase_key": purchase["purchase_key"], **payload})
 
-    def _evaluate(self, connection: sqlite3.Connection, attribution: dict[str, Any]) -> dict[str, Any]:
-        purchase = self._purchase(connection, attribution["purchase_key"])
+    def _evaluate(self, connection: sqlite3.Connection, attribution: dict[str, Any],
+                  christmas_category_ids: set[int] | None = None) -> dict[str, Any]:
+        purchase = self._purchase(connection, attribution["purchase_key"], christmas_category_ids)
+        attributed_christmas = attribution["purchase_cents"] - attribution["ordinary_cents"]
+        categorized = purchase["christmas_category_cents"]
+        matches_category = bool(categorized and categorized == attributed_christmas)
         result = {**attribution, "transaction_ids": purchase["transaction_ids"], "warnings": [],
                   "unresolved_refund_cents": 0, "financially_complete": True, "annual_complete": True}
         gift_refunds = {gift["gift_id"]: 0 for gift in attribution["gifts"]}
@@ -491,11 +531,14 @@ class ChristmasLedger:
             resolution = connection.execute(
                 "SELECT payload_json FROM christmas_refunds WHERE refund_entry_id=?", (refund["id"],)
             ).fetchone()
-            if resolution is None:
+            parts = json.loads(resolution["payload_json"]) if resolution else None
+            if parts is None or (matches_category and parts.get("cleared_christmas_category")):
+                if matches_category and refund["id"] not in purchase["christmas_category_refund_ids"]:
+                    ordinary_refunds += -refund["amount_cents"]
+                    continue
                 result["unresolved_refund_cents"] += -refund["amount_cents"]
                 unresolved_steps.append((refund["id"], -refund["amount_cents"]))
                 continue
-            parts = json.loads(resolution["payload_json"])
             for gift_id, amount in parts["gifts"].items():
                 if gift_id not in gift_refunds:
                     raise BudgetValidationError("attribution must preserve gift IDs referenced by refund allocations")
@@ -507,14 +550,20 @@ class ChristmasLedger:
         if exceeds or overhead_refunds > attribution["overhead_cents"] or ordinary_refunds > attribution["ordinary_cents"]:
             raise BudgetValidationError("refund allocations exceed the original gift, overhead or ordinary portion")
         refunded = sum(-refund["amount_cents"] for refund in purchase["refunds"])
-        inactive = purchase["reversed"] or refunded == purchase["purchase_cents"]
+        inactive = (
+            purchase["reversed"] or refunded == purchase["purchase_cents"]
+            or (matches_category and purchase["christmas_category_remaining_cents"] == 0)
+        )
         if not inactive and result["unresolved_refund_cents"]:
             remaining_components = [
                 ("gift", gift["gift_id"], gift["amount_cents"] - gift_refunds[gift["gift_id"]])
                 for gift in attribution["gifts"]
             ] + [("overhead", None, attribution["overhead_cents"] - overhead_refunds),
                  ("ordinary", None, attribution["ordinary_cents"] - ordinary_refunds)]
-            remaining_components = [item for item in remaining_components if item[2] > 0]
+            remaining_components = [
+                item for item in remaining_components
+                if item[2] > 0 and (not matches_category or item[0] != "ordinary")
+            ]
             if len(remaining_components) == 1 and result["unresolved_refund_cents"] <= remaining_components[0][2]:
                 kind, gift_id, _ = remaining_components[0]
                 amount = result["unresolved_refund_cents"]
@@ -532,9 +581,17 @@ class ChristmasLedger:
             result["financially_complete"] = False
             result["annual_complete"] = False
             result["warnings"].append("Financial correction changed the purchase total; update its Christmas attribution.")
+        if not inactive and categorized and attributed_christmas and not matches_category:
+            result["financially_complete"] = False
+            result["annual_complete"] = False
+            result["warnings"].append("Financial Christmas category and attribution amounts differ; update the details.")
+        if not inactive and attributed_christmas and not categorized:
+            result["warnings"].append(
+                "Some attributed Christmas spending uses ordinary financial categories and counts toward the monthly allowance."
+            )
         if result["unresolved_refund_cents"]:
             result["financially_complete"] = False
-            if attribution["ordinary_cents"]:
+            if attribution["ordinary_cents"] and not matches_category:
                 result["annual_complete"] = False
             result["warnings"].append("Partial refund allocation is unresolved; clarify gifts, overhead and ordinary portions.")
         result["net_gifts"] = []
@@ -548,10 +605,50 @@ class ChristmasLedger:
         result["net_christmas_cents"] = result["net_overhead_cents"] + sum(
             gift["net_amount_cents"] for gift in result["net_gifts"]
         )
-        if not attribution["ordinary_cents"] and result["annual_complete"]:
+        if not inactive and matches_category:
+            result["net_christmas_cents"] = purchase["christmas_category_remaining_cents"]
+        elif not attribution["ordinary_cents"] and result["annual_complete"]:
             result["net_christmas_cents"] -= result["unresolved_refund_cents"]
         result["reversed"] = purchase["reversed"]
         return result
+
+    def _pending_activity(self, connection: sqlite3.Connection,
+                          category_ids: set[int]) -> dict[str, int]:
+        pending = {"pending_purchase_count": 0, "pending_purchase_cents": 0,
+                   "pending_unlinked_refund_count": 0, "pending_unlinked_refund_cents": 0}
+        if not category_ids:
+            return pending
+        placeholders = ",".join("?" for _ in category_ids)
+        rows = connection.execute(
+            f"SELECT DISTINCT COALESCE(entry.split_group_id, entry.transaction_id) AS purchase_id "
+            f"FROM ledger_entries entry WHERE entry.category_id IN ({placeholders}) "
+            "AND entry.operation_type = 'expense' AND NOT EXISTS ("
+            "SELECT 1 FROM ledger_entries reversal WHERE reversal.reverses_entry_id = entry.id)",
+            tuple(category_ids),
+        )
+        attributed = {
+            row[0] for row in connection.execute(
+                "SELECT purchase_key FROM christmas_attributions "
+                "WHERE json_extract(payload_json, '$.purchase_cents') > json_extract(payload_json, '$.ordinary_cents')"
+            )
+        }
+        for row in rows:
+            if row["purchase_id"] in attributed:
+                continue
+            purchase = self._purchase(connection, row["purchase_id"], category_ids)
+            if (not purchase["reversed"] and purchase["purchase_key"] not in attributed
+                    and purchase["christmas_category_remaining_cents"] > 0):
+                pending["pending_purchase_count"] += 1
+                pending["pending_purchase_cents"] += purchase["christmas_category_remaining_cents"]
+        refund = connection.execute(
+            f"SELECT COUNT(*) AS count, COALESCE(SUM(-amount_cents), 0) AS cents "
+            f"FROM ledger_entries WHERE category_id IN ({placeholders}) "
+            "AND operation_type = 'refund' AND refunds_entry_id IS NULL",
+            tuple(category_ids),
+        ).fetchone()
+        pending["pending_unlinked_refund_count"] = refund["count"]
+        pending["pending_unlinked_refund_cents"] = refund["cents"]
+        return pending
 
     def summary(self, *, year: int) -> dict[str, Any]:
         year = _year(year)
@@ -564,10 +661,14 @@ class ChristmasLedger:
             totals = {recipient_id: 0 for recipient_id in children}
             known_spent = unassigned = unresolved = 0
             warnings = []
-            complete = comparison_known = True
+            category_ids = self._christmas_category_ids(connection)
+            pending = self._pending_activity(connection, category_ids)
+            complete = comparison_known = not (
+                pending["pending_purchase_count"] or pending["pending_unlinked_refund_count"]
+            )
             rows = connection.execute("SELECT payload_json FROM christmas_attributions WHERE year=?", (year,)).fetchall()
             for row in rows:
-                evaluated = self._evaluate(connection, json.loads(row["payload_json"]))
+                evaluated = self._evaluate(connection, json.loads(row["payload_json"]), category_ids)
                 known_spent += evaluated["net_christmas_cents"]
                 unresolved += evaluated["unresolved_refund_cents"]
                 complete = complete and evaluated["annual_complete"]
@@ -598,9 +699,9 @@ class ChristmasLedger:
                     "by_recipient_cents": totals if comparison_known else None,
                     "unassigned_gift_cents": unassigned, "unresolved_refund_cents": unresolved,
                     "comparison_complete": comparison_complete,
-                    "spending_complete": complete,
+                    "spending_complete": complete, **pending,
                     "warnings": list(dict.fromkeys(warnings)),
-                    "coverage": "Explicitly attributed purchases only; untagged purchases have not been reviewed."}
+                    "coverage": "Annual totals use explicit attribution. Pending financial Christmas activity is shown separately across all years."}
 
     def details(self, *, year: int, limit: int = 50, offset: int = 0) -> dict[str, Any]:
         year = _year(year)
